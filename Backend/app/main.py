@@ -1,49 +1,3 @@
-# # In file: Backend/app/main.py
-
-# from fastapi import FastAPI
-# from fastapi.middleware.cors import CORSMiddleware
-# # Import the routers
-# from app.api.v1.routes_upload import router as http_upload_router, ws_router
-# from app.api.v1 import routes_auth, routes_download
-
-# # --- Create a SINGLE FastAPI application instance ---
-# app = FastAPI(title="File Transfer Service")
-
-# origins = [
-#     "http://localhost:4200",
-#     "https://teletransfer.vercel.app"
-# ]
-
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=origins,
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
-
-# # --- MODIFIED: Mount the WebSocket router directly onto the main app ---
-# # This is a more robust way to handle complex path parameters in WebSocket URLs.
-# app.include_router(ws_router, prefix="/ws_api", tags=["WebSocket Upload"])
-
-# # Include the standard HTTP routers
-# app.include_router(routes_auth.router, prefix="/api/v1/auth", tags=["Authentication"])
-# app.include_router(http_upload_router, prefix="/api/v1", tags=["Upload"])
-# app.include_router(routes_download.router, prefix="/api/v1", tags=["Download"])
-
-# @app.get("/")
-# def read_root():
-#     return {"message": "Welcome to the File Transfer API"}
-
-# # --- REMOVED: The separate ws_app is no longer necessary ---
-# # ws_app = FastAPI(title="File Transfer Service - WebSockets")
-# # ws_app.include_router(ws_router)
-# # app.mount("/ws_api", ws_app)
-
-
-
-# In file: Backend/app/main.py
-
 # --- ADDED: Imports needed for the WebSocket logic ---
 import httpx
 from celery import chain
@@ -53,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # --- MODIFIED: Import only the http_upload_router ---
 from app.api.v1.routes_upload import router as http_upload_router
 from app.api.v1 import routes_auth, routes_download
+from app.api.v1 import routes_batch_upload
 
 # --- ADDED: Imports for models and services used by the WebSocket ---
 from app.db.mongodb import db
@@ -175,6 +130,7 @@ async def websocket_upload_proxy(
 app.include_router(routes_auth.router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(http_upload_router, prefix="/api/v1", tags=["Upload"])
 app.include_router(routes_download.router, prefix="/api/v1", tags=["Download"])
+app.include_router(routes_batch_upload.router, prefix="/api/v1/batch", tags=["Batch Upload"])
 
 @app.get("/")
 def read_root():
