@@ -2,7 +2,7 @@
 
 import uuid
 from typing import Optional
-
+from fastapi.responses import StreamingResponse
 from fastapi import APIRouter, HTTPException, Depends
 from typing import Optional, List
 
@@ -15,6 +15,7 @@ from app.models.user import UserInDB
 from app.db.mongodb import db
 from app.services.auth_service import get_current_user_optional
 from app.services import google_drive_service
+from app.services import zipping_service
 
 # This new router will handle all API calls related to batch processing.
 router = APIRouter()
@@ -121,3 +122,30 @@ async def get_batch_files_metadata(batch_id: str):
         raise HTTPException(status_code=404, detail="No files found for this batch")
 
     return files_list
+
+
+
+# In file: Backend/app/api/v1/routes_batch_upload.py
+
+# ... (@router.get("/{batch_id}", ...)) unchanged
+
+# --- V V V --- ADD THE NEW ENDPOINT BELOW --- V V V ---
+
+@router.get("/download-zip/{batch_id}")
+async def download_batch_as_zip(batch_id: str):
+    """
+    Fetches all files in a batch, creates a zip archive in memory,
+    and streams it back to the client.
+    """
+    # Define headers for the response
+    zip_filename = f"batch_{batch_id}.zip"
+    headers = {
+        'Content-Disposition': f'attachment; filename="{zip_filename}"'
+    }
+
+    # Return a streaming response that uses our zipping service generator
+    return StreamingResponse(
+        zipping_service.stream_zip_archive(batch_id),
+        media_type="application/zip",
+        headers=headers
+    )
