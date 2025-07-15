@@ -1,53 +1,99 @@
+# # fastapi
+# # uvicorn[standard]
+# # pydantic[email,dotenv]
+# # pymongo
+# # python-jose[cryptography]
+# # passlib[bcrypt]
+# # google-api-python-client
+# # google-auth-httplib2
+# # google-auth-oauthlib
+# # httpx
+
+# # python-multipart
+# # google-auth
+# # google-api-python-client
+# # python-dotenv
+# # google-api-python-client
+# # google-auth-httplib2
+# # google-auth-oauthlib
+# # python-dotenv
+
+# # Flask>=2.0
+# # Flask-CORS
+# # Flask-Login
+# # Flask-JWT-Extended
+# # flask_mail
+# # flask_admin
+# # Flask-WTF
+# # email_validator
+# # httpx
+# # celery
+# # redis
+
+# # # Database (for MongoDB BSON/ObjectId)
+# # pymongo
+# # requests
+# # python-dotenv
+# # python-dateutil
+# # pytz
+# # # Keep python-telegram-bot if you still use bot.py separately
+# # python-telegram-bot==13.15
+# # fastapi
+# # passlib
+# # jose
+# # pydantic_settings
+
+
+# # # --- ADD THESE TWO LINES ---
+# # gunicorn
+# # supervisor
+
+
+# # Web Framework
 # fastapi
+# gunicorn
 # uvicorn[standard]
-# pydantic[email,dotenv]
-# pymongo
+# python-multipart
+
+# # Settings and Data Validation
+# pydantic[email]
+# pydantic_settings
+# python-dotenv
+
+# # Authentication & Security
 # python-jose[cryptography]
 # passlib[bcrypt]
+
+# # Database
+# pymongo
+
+# # Google API
 # google-api-python-client
 # google-auth-httplib2
 # google-auth-oauthlib
-# httpx
 
-# python-multipart
-# google-auth
-# google-api-python-client
-# python-dotenv
-# google-api-python-client
-# google-auth-httplib2
-# google-auth-oauthlib
-# python-dotenv
-
-# Flask>=2.0
-# Flask-CORS
-# Flask-Login
-# Flask-JWT-Extended
-# flask_mail
-# flask_admin
-# Flask-WTF
-# email_validator
-# httpx
+# # Celery and Workers
 # celery
 # redis
+# gevent
 
-# # Database (for MongoDB BSON/ObjectId)
-# pymongo
-# requests
-# python-dotenv
-# python-dateutil
-# pytz
-# # Keep python-telegram-bot if you still use bot.py separately
+# # Other Utilities
+# httpx
 # python-telegram-bot==13.15
-# fastapi
-# passlib
-# jose
-# pydantic_settings
 
-
-# # --- ADD THESE TWO LINES ---
-# gunicorn
+# # Process Management
 # supervisor
 
+
+
+
+#########################################################################################################
+#########################################################################################################
+#########################################################################################################
+
+
+
+# In file: Backend/requirements.txt
 
 # Web Framework
 fastapi
@@ -72,14 +118,14 @@ google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
 
-# Celery and Workers
-celery
-redis
-gevent
+# --- REMOVED: Celery and related workers ---
+# celery
+# redis
+# gevent
 
 # Other Utilities
 httpx
-python-telegram-bot==13.15
+# --- REMOVED: python-telegram-bot ---
 
 # Process Management
 supervisor
