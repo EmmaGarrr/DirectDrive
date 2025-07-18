@@ -7,15 +7,6 @@ class Settings(BaseSettings):
     MONGODB_URI: str
     DATABASE_NAME: str
 
-    # Google Drive
-    # GOOGLE_DRIVE_FOLDER_ID: str
-    GOOGLE_APPLICATION_CREDENTIALS: str
-    
-    # NEW: Add the OAuth 2.0 credentials
-    GOOGLE_OAUTH_CREDENTIALS_PATH: str
-    GOOGLE_OAUTH_REFRESH_TOKEN: str
-    GOOGLE_DRIVE_FOLDER_ID: Optional[str] = None
-
     # Telegram
     TELEGRAM_BOT_TOKEN: str
     TELEGRAM_CHANNEL_ID: str
@@ -29,6 +20,7 @@ class Settings(BaseSettings):
     OAUTH_CLIENT_ID: str
     OAUTH_CLIENT_SECRET: str
     OAUTH_REFRESH_TOKEN: str
+    GOOGLE_DRIVE_FOLDER_ID: Optional[str] = None
     
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
 
