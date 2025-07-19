@@ -252,7 +252,8 @@ from app.db.mongodb import db
 # --- MODIFIED: Removed telegram_service import ---
 from app.services import google_drive_service
 from app.models.file import FileMetadataInDB, StorageLocation
-
+from datetime import datetime
+from app.admin_ws_manager import admin_manager
 router = APIRouter()
 
 @router.get(
@@ -290,6 +291,10 @@ async def stream_download(file_id: str, request: Request):
 
     # The content_streamer generator is async, so the parent must be too.
     async def content_streamer():
+        # ADD THIS BROADCAST
+        timestamp = datetime.utcnow().isoformat()
+        await admin_manager.broadcast(f"[{timestamp}] [API_REQUEST] Google Drive: Start File Download for '{filename}' (file_id: {file_id})")
+
         print(f"[STREAMER] Starting stream for '{filename}' from {storage_location}.")
         try:
             # --- MODIFIED: Simplified to only handle GDrive ---

@@ -333,13 +333,54 @@ from app.api.v1 import routes_auth, routes_download, routes_batch_upload
 from app.db.mongodb import db
 from app.models.file import UploadStatus, StorageLocation
 from app.core.config import settings
+from .admin_ws_manager import admin_manager
+from datetime import datetime
+from typing import List
+from fastapi import WebSocket
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            await connection.send_text(message)
+
+manager = ConnectionManager()
 
 # --- Create a SINGLE FastAPI application instance ---
 app = FastAPI(title="File Transfer Service")
 
+# ADD THIS WHOLE FUNCTION RIGHT AFTER app = FastAPI(...)
+@app.websocket("/ws_admin")
+async def websocket_admin_endpoint(websocket: WebSocket, token: str = ""):
+    # Security Check: Make sure the token is correct
+    if token != settings.ADMIN_WEBSOCKET_TOKEN:
+        await websocket.close(code=1008, reason="Invalid admin token")
+        return
+    
+    await manager.connect(websocket)
+    print("Admin client connected.")
+    try:
+        while True:
+            # Just keep the connection alive. We only send, we don't receive.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+        print("Admin client disconnected.")
+
 origins = [
     "http://localhost:4200",
-    "https://teletransfer.vercel.app"
+    "https://teletransfer.vercel.app",
+"http://135.148.33.247",
+"https://*.vercel.app"
 ]
 
 app.add_middleware(
@@ -357,6 +398,8 @@ async def websocket_upload_proxy(
     gdrive_url: str
 ):
     await websocket.accept()
+    timestamp = datetime.utcnow().isoformat()
+    await admin_manager.broadcast(f"[{timestamp}] [UPLOAD_START] User started upload for file_id: {file_id}")
     
     file_doc = db.files.find_one({"_id": file_id})
     if not file_doc:
@@ -374,6 +417,7 @@ async def websocket_upload_proxy(
         try:
             # --- MODIFIED: Renamed status for clarity ---
             db.files.update_one({"_id": file_id}, {"$set": {"status": UploadStatus.UPLOADING}})
+            await manager.broadcast(f"EVENT: Upload started for file '{file_doc.get('filename')}' (ID: {file_id})")
             
             while True:
                 message = await websocket.receive()
@@ -392,6 +436,8 @@ async def websocket_upload_proxy(
                 }
                 
                 response = await client.put(gdrive_url, content=chunk, headers=headers)
+                timestamp = datetime.utcnow().isoformat()
+                await admin_manager.broadcast(f"[{timestamp}] [DATA_TRANSFER] GDrive: Forwarded chunk for {file_id}. Response: {response.status_code}")
                 
                 if response.status_code not in [200, 201, 308]:
                     error_detail = f"Google Drive API Error: {response.text}"
@@ -401,6 +447,8 @@ async def websocket_upload_proxy(
                 bytes_sent += len(chunk)
                 percentage = int((bytes_sent / total_size) * 100)
                 await websocket.send_json({"type": "progress", "value": percentage})
+
+                await manager.broadcast(f"EVENT: Upload progress for '{file_doc.get('filename')}': {percentage}%")
 
             if response.status_code not in [200, 201]:
                  raise Exception(f"Final Google Drive response was not successful: Status {response.status_code}")
@@ -424,6 +472,10 @@ async def websocket_upload_proxy(
 
             download_path = f"/api/v1/download/stream/{file_id}"
             await websocket.send_json({"type": "success", "value": download_path})
+            await manager.broadcast(f"EVENT: SUCCESS! File '{file_doc.get('filename')}' uploaded. Link created.")
+
+            timestamp = datetime.utcnow().isoformat()
+            await admin_manager.broadcast(f"[{timestamp}] [UPLOAD_SUCCESS] GDrive upload complete for {file_id}. GDrive ID: {gdrive_id}")
             
             # --- REMOVED: Celery task chain dispatch logic has been deleted ---
             print(f"[{file_id}] Upload to Google Drive complete. No further tasks.")
@@ -454,6 +506,7 @@ app.include_router(routes_auth.router, prefix="/api/v1/auth", tags=["Authenticat
 app.include_router(http_upload_router, prefix="/api/v1", tags=["Upload"])
 app.include_router(routes_download.router, prefix="/api/v1", tags=["Download"])
 app.include_router(routes_batch_upload.router, prefix="/api/v1/batch", tags=["Batch Upload"])
+
 
 @app.get("/")
 def read_root():

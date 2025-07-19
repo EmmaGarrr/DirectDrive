@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     GOOGLE_DRIVE_FOLDER_ID: Optional[str] = None
     
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
+    ADMIN_WEBSOCKET_TOKEN: str
 
     class Config:
         env_file = ".env"

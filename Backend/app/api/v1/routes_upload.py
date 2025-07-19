@@ -353,7 +353,9 @@ from app.models.user import UserInDB
 from app.db.mongodb import db
 from app.services.auth_service import get_current_user_optional, get_current_user
 from app.services import google_drive_service
+from datetime import datetime
 
+from app.admin_ws_manager import admin_manager
 # --- MODIFIED: Only one router is needed in this file now ---
 router = APIRouter()
 # ws_router has been removed.
@@ -372,6 +374,9 @@ async def initiate_upload(
     except Exception as e:
         print(f"!!! FAILED to create Google Drive resumable session: {e}")
         raise HTTPException(status_code=503, detail="Cloud storage service is currently unavailable.")
+    # ADD THIS BROADCAST
+    timestamp = datetime.utcnow().isoformat()
+    await admin_manager.broadcast(f"[{timestamp}] [API_REQUEST] Google Drive: Initiate Resumable Upload for '{request.filename}'") 
 
     file_meta = FileMetadataCreate(
         _id=file_id,
