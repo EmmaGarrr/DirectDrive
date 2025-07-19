@@ -11,6 +11,7 @@ from app.api.v1 import routes_auth, routes_download, routes_batch_upload
 from app.db.mongodb import db
 from app.models.file import UploadStatus, StorageLocation
 from app.core.config import settings
+from app.ws_manager import manager
 
 # ===================================================================
 # 1. DEFINE THE CONNECTION MANAGER FOR ADMINS

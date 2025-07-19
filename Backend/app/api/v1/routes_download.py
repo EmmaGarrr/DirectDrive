@@ -248,13 +248,13 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from urllib.parse import quote
 import datetime
+from app.ws_manager import manager
 
 from app.db.mongodb import db
 # --- MODIFIED: Removed telegram_service import ---
 from app.services import google_drive_service
 from app.models.file import FileMetadataInDB, StorageLocation
 from datetime import datetime
-from app.admin_ws_manager import admin_manager
 router = APIRouter()
 
 @router.get(
@@ -294,7 +294,7 @@ async def stream_download(file_id: str, request: Request):
     async def content_streamer():
         # ADD THIS BROADCAST
         timestamp = datetime.utcnow().isoformat()
-        await admin_manager.broadcast(f"[{timestamp}] [API_REQUEST] Google Drive: Start File Download for '{filename}' (file_id: {file_id})")
+        await manager.broadcast(f"[{timestamp}] [API_REQUEST] Google Drive: Start File Download for '{filename}' (file_id: {file_id})")
 
         print(f"[STREAMER] Starting stream for '{filename}' from {storage_location}.")
         try:
