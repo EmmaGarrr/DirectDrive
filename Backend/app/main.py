@@ -359,9 +359,12 @@ manager = ConnectionManager()
 app = FastAPI(title="File Transfer Service")
 
 # ADD THIS WHOLE FUNCTION RIGHT AFTER app = FastAPI(...)
+# ===================================================================
+# ADD THIS ENTIRE FUNCTION RIGHT AFTER app = FastAPI(...)
+# ===================================================================
 @app.websocket("/ws_admin")
 async def websocket_admin_endpoint(websocket: WebSocket, token: str = ""):
-    # Security Check: Make sure the token is correct
+    # A simple security check
     if token != settings.ADMIN_WEBSOCKET_TOKEN:
         await websocket.close(code=1008, reason="Invalid admin token")
         return
@@ -370,7 +373,6 @@ async def websocket_admin_endpoint(websocket: WebSocket, token: str = ""):
     print("Admin client connected.")
     try:
         while True:
-            # Just keep the connection alive. We only send, we don't receive.
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
