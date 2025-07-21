@@ -5,7 +5,7 @@ import google_auth_oauthlib.flow
 # It must match exactly.
 SCOPES = ['https://www.googleapis.com/auth/drive']
 # The path to the credentials file you just downloaded.
-CLIENT_SECRETS_FILE = "credentials/oauth-credentials.json"
+CLIENT_SECRETS_FILE = "credentials/cred.json"
 
 def main():
     # Create a flow instance to manage the authorization process.

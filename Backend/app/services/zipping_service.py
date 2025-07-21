@@ -7,7 +7,7 @@ from typing import AsyncGenerator
 
 from app.db.mongodb import db
 from app.services import google_drive_service
-from app.services import telegram_service
+# from app.services import telegram_service
 
 # Define a custom exception for clarity
 class FileFetchError(Exception):
@@ -30,13 +30,13 @@ async def stream_file_content(file_doc: dict) -> AsyncGenerator[bytes, None]:
             async for chunk in google_drive_service.async_stream_gdrive_file(gdrive_id):
                 yield chunk
 
-        elif storage_location == "telegram":
-            telegram_file_ids = file_doc.get("telegram_file_ids")
-            if not telegram_file_ids:
-                raise FileFetchError(f"File {file_id} is in Telegram but IDs are missing.")
+        # elif storage_location == "telegram":
+        #     telegram_file_ids = file_doc.get("telegram_file_ids")
+        #     if not telegram_file_ids:
+        #         raise FileFetchError(f"File {file_id} is in Telegram but IDs are missing.")
 
-            async for chunk in telegram_service.stream_file_from_telegram(telegram_file_ids):
-                yield chunk
+        #     async for chunk in telegram_service.stream_file_from_telegram(telegram_file_ids):
+        #         yield chunk
         else:
             raise FileFetchError(f"File {file_id} has an unknown or unavailable storage location.")
     
