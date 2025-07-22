@@ -15,6 +15,12 @@ RUN apt-get update && apt-get install -y supervisor && rm -rf /var/lib/apt/lists
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# --- NEW: Add a failsafe to ensure old code is gone ---
+# This command deletes everything in /app before copying the new code,
+# preventing any stale files from lingering in a cached layer.
+RUN rm -rf /app/*
+# --- END OF NEW ---
+
 # Copy the entire backend application code into the container
 COPY . .
 
