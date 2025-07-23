@@ -327,79 +327,82 @@
 
 # # In file: Backend/app/api/v1/routes_download.py
 
-# from fastapi import APIRouter, HTTPException, Request
-# from fastapi.responses import StreamingResponse
-# from urllib.parse import quote
-# from datetime import datetime
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
+from urllib.parse import quote
+from datetime import datetime
 
-# from app.db.mongodb import db
-# # --- MODIFIED: Import the pool manager and helper functions ---
-# from app.services.google_drive_service import gdrive_pool_manager, async_stream_gdrive_file
-# from app.models.file import FileMetadataInDB, StorageLocation
-# # from app.ws_manager import manager
+from app.db.mongodb import db
+# --- MODIFIED: Import the pool manager and helper functions ---
+from app.services.google_drive_service import gdrive_pool_manager, async_stream_gdrive_file
+from app.models.file import FileMetadataInDB, StorageLocation
+# Import download semaphore for resource protection
+from app.main import download_semaphore
 
-# router = APIRouter()
+router = APIRouter()
 
-# @router.get(
-#     "/files/{file_id}/meta",
-#     response_model=FileMetadataInDB,
-#     summary="Get File Metadata"
-# )
-# def get_file_metadata(file_id: str):
-#     file_doc = db.files.find_one({"_id": file_id})
-#     if not file_doc:
-#         raise HTTPException(status_code=404, detail="File not found")
-#     return file_doc
+@router.get(
+    "/files/{file_id}/meta",
+    response_model=FileMetadataInDB,
+    summary="Get File Metadata"
+)
+def get_file_metadata(file_id: str):
+    file_doc = db.files.find_one({"_id": file_id})
+    if not file_doc:
+        raise HTTPException(status_code=404, detail="File not found")
+    return file_doc
 
-# @router.get(
-#     "/download/stream/{file_id}",
-#     summary="Stream File for Download"
-# )
-# async def stream_download(file_id: str, request: Request):
-#     file_doc = db.files.find_one({"_id": file_id})
-#     if not file_doc:
-#         raise HTTPException(status_code=404, detail="File not found")
+@router.get(
+    "/download/stream/{file_id}",
+    summary="Stream File for Download"
+)
+async def stream_download(file_id: str, request: Request):
+    # ADD AT START - Wait for available download slot
+    async with download_semaphore:
+        file_doc = db.files.find_one({"_id": file_id})
+        if not file_doc:
+            raise HTTPException(status_code=404, detail="File not found")
 
-#     filename = file_doc.get("filename", "download")
-#     filesize = file_doc.get("size_bytes", 0)
-#     gdrive_id = file_doc.get("gdrive_id")
-    
-#     # --- NEW: Find out which account the file is stored on ---
-#     account_id = file_doc.get("gdrive_account_id")
-#     if not account_id:
-#         raise HTTPException(status_code=500, detail="File metadata is incomplete: missing account ID.")
+        filename = file_doc.get("filename", "download")
+        filesize = file_doc.get("size_bytes", 0)
+        gdrive_id = file_doc.get("gdrive_id")
+        
+        # --- NEW: Find out which account the file is stored on ---
+        account_id = file_doc.get("gdrive_account_id")
+        if not account_id:
+            raise HTTPException(status_code=500, detail="File metadata is incomplete: missing account ID.")
 
-#     # --- NEW: Get the specific account credentials from the pool ---
-#     storage_account = gdrive_pool_manager.get_account_by_id(account_id)
-#     if not storage_account:
-#         raise HTTPException(status_code=500, detail=f"Configuration for storage account '{account_id}' not found.")
+        # --- NEW: Get the specific account credentials from the pool ---
+        storage_account = gdrive_pool_manager.get_account_by_id(account_id)
+        if not storage_account:
+            raise HTTPException(status_code=500, detail=f"Configuration for storage account '{account_id}' not found.")
 
-#     if not gdrive_id:
-#         raise HTTPException(status_code=404, detail="File is in GDrive but ID is missing in metadata.")
+        if not gdrive_id:
+            raise HTTPException(status_code=404, detail="File is in GDrive but ID is missing in metadata.")
 
-#     async def content_streamer():
-#         # timestamp = datetime.utcnow().isoformat()
-#         # await manager.broadcast(f"[{timestamp}] [API_REQUEST] Google Drive: Start File Download for '{filename}'")
+        async def content_streamer():
+            # timestamp = datetime.utcnow().isoformat()
+            # await manager.broadcast(f"[{timestamp}] [API_REQUEST] Google Drive: Start File Download for '{filename}'")
 
-#         print(f"[STREAMER] Starting stream for '{filename}' from account {storage_account.id}.")
-#         try:
-#             # --- MODIFIED: Pass the specific storage_account to the stream function ---
-#             async for chunk in async_stream_gdrive_file(gdrive_id, account=storage_account):
-#                 yield chunk
-#             print(f"[STREAMER] Finished streaming '{filename}' successfully.")
-#         except Exception as e:
-#             print(f"!!! [STREAMER] An error occurred during file stream for {file_id}: {e}")
+            print(f"[STREAMER] Starting stream for '{filename}' from account {storage_account.id}.")
+            try:
+                # --- MODIFIED: Pass the specific storage_account to the stream function ---
+                async for chunk in async_stream_gdrive_file(gdrive_id, account=storage_account):
+                    yield chunk
+                print(f"[STREAMER] Finished streaming '{filename}' successfully.")
+            except Exception as e:
+                print(f"!!! [STREAMER] An error occurred during file stream for {file_id}: {e}")
 
-#     headers = {
-#         "Content-Length": str(filesize),
-#         "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"
-#     }
+        headers = {
+            "Content-Length": str(filesize),
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"
+        }
 
-#     return StreamingResponse(
-#         content=content_streamer(),
-#         media_type="application/octet-stream",
-#         headers=headers
-#     )
+        return StreamingResponse(
+            content=content_streamer(),
+            media_type="application/octet-stream",
+            headers=headers
+        )
 
 
 

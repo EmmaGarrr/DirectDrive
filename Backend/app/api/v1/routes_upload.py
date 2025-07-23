@@ -423,12 +423,24 @@ from datetime import datetime
 
 router = APIRouter()
 
+from fastapi import Request
+from app.services.rate_limiter import rate_limiter
+
 @router.post("/upload/initiate", response_model=dict)
 async def initiate_upload(
     request: InitiateUploadRequest,
+    client_request: Request,  # ADD THIS
     current_user: Optional[UserInDB] = Depends(get_current_user_optional)
 ):
     file_id = str(uuid.uuid4())
+    
+    # GET CLIENT IP
+    client_ip = client_request.client.host
+    
+    # CHECK RATE LIMIT INSTEAD OF USER QUOTA
+    allowed, message = await rate_limiter.check_rate_limit(client_ip, request.size)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=message)
     
     # --- NEW: Get an active account from the pool ---
     active_account = await gdrive_pool_manager.get_active_account()

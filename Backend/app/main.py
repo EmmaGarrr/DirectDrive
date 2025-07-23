@@ -369,23 +369,24 @@
 
 # # FILE: Backend/app/main.py
 
-# import httpx
-# from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-# from fastapi.middleware.cors import CORSMiddleware
-# from typing import List
-# import asyncio
+import httpx
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from typing import List
+import asyncio
 
-# from app.api.v1.routes_upload import router as http_upload_router
-# from app.api.v1 import routes_auth, routes_download, routes_batch_upload
-# from app.db.mongodb import db
-# from app.models.file import UploadStatus, StorageLocation
-# from app.core.config import settings
-# from app.services import backup_service
+from app.api.v1.routes_upload import router as http_upload_router
+from app.api.v1 import routes_auth, routes_download, routes_batch_upload
+from app.db.mongodb import db
+from app.models.file import UploadStatus, StorageLocation
+from app.core.config import settings
+from app.services import backup_service
 
-# # --- FINAL FIX: CONCURRENCY LIMITER FOR BACKGROUND TASKS ---
-# # This creates a "gate" that only allows 2 backup tasks to run at a time.
-# # Others will wait politely in a queue.
-# BACKUP_TASK_SEMAPHORE = asyncio.Semaphore(1)
+# --- FINAL FIX: CONCURRENCY LIMITER FOR BACKGROUND TASKS ---
+# This creates a "gate" that only allows 2 backup tasks to run at a time.
+# Others will wait politely in a queue.
+BACKUP_TASK_SEMAPHORE = asyncio.Semaphore(1)
+# --- END OF FINAL FIX ---
 # # --- END OF FINAL FIX ---
 
 # class ConnectionManager:
@@ -502,8 +503,14 @@ from app.core.config import settings
 # Use the new, stable backup service
 from app.services import backup_service
 
-# Strict concurrency limiter for server stability
-BACKUP_TASK_SEMAPHORE = asyncio.Semaphore(1)
+# Increased concurrency limiter for better throughput
+# RESOURCE PROTECTION FOR 2-CORE SERVER
+MAX_CONCURRENT_UPLOADS = 20  # Max 20 uploads globally
+MAX_CONCURRENT_DOWNLOADS = 30  # Max 30 downloads globally
+BACKUP_TASK_SEMAPHORE = asyncio.Semaphore(3)  # CHANGE from 10 to 3
+
+upload_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
+download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
 # --- The rest of the main.py file is largely the same ---
 class ConnectionManager:
@@ -516,6 +523,37 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 app = FastAPI(title="File Transfer Service")
+
+# ADD INDEX CREATION AND CLEANUP TASK TO STARTUP
+from app.db.indexes import create_indexes
+from app.tasks.cleanup_task import cleanup_orphaned_uploads
+
+# Global semaphores for resource protection
+upload_semaphore = asyncio.Semaphore(20)  # Max 20 concurrent uploads
+download_semaphore = asyncio.Semaphore(30)  # Max 30 concurrent downloads
+backup_semaphore = asyncio.Semaphore(3)   # Max 3 concurrent backup operations
+
+async def run_periodic_cleanup():
+    """Run the cleanup task periodically to free up disk space"""
+    while True:
+        try:
+            # Run cleanup task every 2 hours
+            await cleanup_orphaned_uploads()
+            print("[CLEANUP] Completed orphaned uploads cleanup task")
+        except Exception as e:
+            print(f"[CLEANUP] Error during cleanup task: {e}")
+        
+        # Wait for 2 hours before running again
+        await asyncio.sleep(7200)  # 2 hours = 7200 seconds
+
+@app.on_event("startup")
+async def startup_event():
+    # Create MongoDB indexes
+    create_indexes()
+    
+    # Start the periodic cleanup task
+    asyncio.create_task(run_periodic_cleanup())
+
 origins = ["http://localhost:4200", "http://135.148.33.247", "https://teletransfer.vercel.app", "https://*.vercel.app"]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -540,52 +578,66 @@ async def run_controlled_backup(file_id: str):
 
 @app.websocket("/ws_api/upload/{file_id}")
 async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url: str):
-    await websocket.accept()
-    file_doc = db.files.find_one({"_id": file_id})
-    if not file_doc: await websocket.close(code=1008, reason="File ID not found"); return
-    if not gdrive_url: await websocket.close(code=1008, reason="gdrive_url query parameter is missing."); return
-    
-    total_size = file_doc.get("size_bytes", 0)
-    
-    try:
-        # Simplified upload proxy logic
-        async with httpx.AsyncClient(timeout=None) as client:
-            bytes_sent = 0
-            while bytes_sent < total_size:
-                message = await websocket.receive()
-                chunk = message.get("bytes")
-                if not chunk: continue
-                
-                start_byte = bytes_sent
-                end_byte = bytes_sent + len(chunk) - 1
-                headers = {'Content-Length': str(len(chunk)), 'Content-Range': f'bytes {start_byte}-{end_byte}/{total_size}'}
-                response = await client.put(gdrive_url, content=chunk, headers=headers)
-                
-                if response.status_code not in [200, 201, 308]:
-                    raise HTTPException(status_code=response.status_code, detail=f"Google Drive API Error: {response.text}")
-
-                bytes_sent += len(chunk)
-                await websocket.send_json({"type": "progress", "value": int((bytes_sent / total_size) * 100)})
-
-        # Get final GDrive ID from the last response
-        gdrive_response_data = response.json() if 'response' in locals() and response else {}
-        gdrive_id = gdrive_response_data.get('id')
-        if not gdrive_id and total_size > 0:
-            raise Exception("Upload to GDrive succeeded, but no file ID was returned.")
-
-        db.files.update_one({"_id": file_id}, {"$set": {"gdrive_id": gdrive_id, "status": UploadStatus.COMPLETED, "storage_location": StorageLocation.GDRIVE }})
-        await websocket.send_json({"type": "success", "value": f"/api/v1/download/stream/{file_id}"})
+    # ADD AT START
+    async with upload_semaphore:  # Wait for available upload slot
+        await websocket.accept()
+        file_doc = db.files.find_one({"_id": file_id})
+        if not file_doc: await websocket.close(code=1008, reason="File ID not found"); return
+        if not gdrive_url: await websocket.close(code=1008, reason="gdrive_url query parameter is missing."); return
         
-        print(f"[MAIN] Triggering silent Hetzner backup for file_id: {file_id}")
-        asyncio.create_task(run_controlled_backup(file_id))
+        total_size = file_doc.get("size_bytes", 0)
+        
+        try:
+            # Simplified upload proxy logic
+            async with httpx.AsyncClient(timeout=None) as client:
+                bytes_sent = 0
+                while bytes_sent < total_size:
+                    message = await websocket.receive()
+                    chunk = message.get("bytes")
+                    if not chunk: continue
+                    
+                    start_byte = bytes_sent
+                    end_byte = bytes_sent + len(chunk) - 1
+                    headers = {'Content-Length': str(len(chunk)), 'Content-Range': f'bytes {start_byte}-{end_byte}/{total_size}'}
+                    response = await client.put(gdrive_url, content=chunk, headers=headers)
+                    
+                    if response.status_code not in [200, 201, 308]:
+                        raise HTTPException(status_code=response.status_code, detail=f"Google Drive API Error: {response.text}")
 
-    except Exception as e:
-        print(f"!!! [{file_id}] Upload proxy failed: {e}")
-        db.files.update_one({"_id": file_id}, {"$set": {"status": UploadStatus.FAILED}})
-        try: await websocket.send_json({"type": "error", "value": "Upload failed."})
-        except RuntimeError: pass
-    finally:
-        if websocket.client_state != "DISCONNECTED": await websocket.close()
+                    bytes_sent += len(chunk)
+                    await websocket.send_json({"type": "progress", "value": int((bytes_sent / total_size) * 100)})
+
+            # Get final GDrive ID from the last response
+            gdrive_response_data = response.json() if 'response' in locals() and response else {}
+            gdrive_id = gdrive_response_data.get('id')
+            if not gdrive_id and total_size > 0:
+                raise Exception("Upload to GDrive succeeded, but no file ID was returned.")
+
+            db.files.update_one({"_id": file_id}, {"$set": {"gdrive_id": gdrive_id, "status": UploadStatus.COMPLETED, "storage_location": StorageLocation.GDRIVE }})
+            
+            # UPDATE USER STORAGE USAGE
+            if file_doc.get("owner_id"):
+                db.users.update_one(
+                    {"_id": file_doc["owner_id"]},
+                    {"$inc": {"storage_used_bytes": file_doc["size_bytes"]}}
+                )
+            
+            await websocket.send_json({"type": "success", "value": f"/api/v1/download/stream/{file_id}"})
+            
+            print(f"[MAIN] Triggering silent Hetzner backup for file_id: {file_id}")
+            asyncio.create_task(run_controlled_backup(file_id))
+
+        except Exception as e:
+            print(f"!!! [{file_id}] Upload proxy failed: {e}")
+            await websocket.send_json({"type": "error", "value": str(e)})
+            db.files.update_one({"_id": file_id}, {"$set": {"status": UploadStatus.FAILED}})
+        finally:
+            # Release rate limit for anonymous uploads
+            if file_doc and file_doc.get("owner_id") is None:  # Anonymous upload
+                ip = websocket.client.host
+                from app.services.rate_limiter import rate_limiter
+                await rate_limiter.release_upload(ip)
+            await websocket.close()
 
 # Include other routers
 app.include_router(routes_auth.router, prefix="/api/v1/auth", tags=["Authentication"])

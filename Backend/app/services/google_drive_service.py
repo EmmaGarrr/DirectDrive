@@ -1352,10 +1352,22 @@ class GoogleDrivePoolManager:
     async def get_active_account(self) -> Optional[GoogleAccountConfig]:
         if self.num_accounts == 0: return None
         async with self._async_lock:
-            for _ in range(self.num_accounts):
-                account = self.get_current_account(); usage = self.tracker.get_usage(account.id)
-                if usage["requests_this_minute"] < REQUEST_LIMIT_PER_MINUTE and usage["bytes_today"] < DAILY_UPLOAD_LIMIT_BYTES: return account
-                self.current_account_index = (self.current_account_index + 1) % self.num_accounts
+            # ADD RETRY LOGIC WITH ACCOUNT RESERVATION
+            for attempt in range(self.num_accounts * 2):  # Double attempts for safety
+                account_index = (self.current_account_index + attempt) % self.num_accounts
+                account = self.accounts[account_index]
+                usage = self.tracker.get_usage(account.id)
+                
+                # ADD 10% BUFFER TO PREVENT EDGE CASES
+                is_request_limit_ok = usage["requests_this_minute"] < (REQUEST_LIMIT_PER_MINUTE * 0.9)
+                is_upload_limit_ok = usage["bytes_today"] < (DAILY_UPLOAD_LIMIT_BYTES * 0.9)
+                
+                if is_request_limit_ok and is_upload_limit_ok:
+                    # IMMEDIATELY INCREMENT TO RESERVE THIS ACCOUNT
+                    self.tracker.increment_request_count(account.id)
+                    self.current_account_index = (account_index + 1) % self.num_accounts
+                    return account
+            
             return None
 gdrive_pool_manager = GoogleDrivePoolManager(settings.GDRIVE_ACCOUNTS)
 
