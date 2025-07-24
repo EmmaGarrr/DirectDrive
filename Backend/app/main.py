@@ -652,8 +652,12 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
             except:
                 print(f"[{file_id}] Could not send error message, WebSocket disconnected")
             
-            # Update file status based on failure reason
-            if upload_cancelled:
+            # Robust cancellation detection: check both flag and upload completeness
+            if upload_cancelled or (bytes_sent < total_size):
+                # Either explicitly cancelled or upload incomplete = user cancellation
+                if not upload_cancelled:
+                    print(f"[UPLOAD_CANCEL] File: {file_id} | User cancelled upload (outer handler) | Reason: {e or 'WebSocket disconnected'}")
+                    print(f"[UPLOAD_CANCEL] Progress: {bytes_sent}/{total_size} bytes ({int((bytes_sent/total_size)*100) if total_size > 0 else 0}%)")
                 print(f"[UPLOAD_CANCEL] Updating database status to 'cancelled' for file: {file_id}")
                 db.files.update_one({"_id": file_id}, {"$set": {"status": "cancelled"}})
                 print(f"[UPLOAD_CANCEL] File {file_id} successfully marked as cancelled in database")
