@@ -582,7 +582,7 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
         if not gdrive_url: await websocket.close(code=1008, reason="gdrive_url query parameter is missing."); return
         
         # Mark upload as started
-        db.files.update_one({"_id": file_id}, {"$set": {"status": UploadStatus.UPLOADING_TO_DRIVE}})
+        db.files.update_one({"_id": file_id}, {"$set": {"status": UploadStatus.UPLOADING}})
         
         total_size = file_doc.get("size_bytes", 0)
         
