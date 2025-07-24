@@ -108,6 +108,7 @@ async def stream_zip_archive(batch_id: str) -> AsyncGenerator[bytes, None]:
     async with MemoryEfficientZipStreamer() as streamer:
         # Create ZipStream instance for true streaming
         zip_stream = ZipStream(compress_level=6)
+        temp_files_to_cleanup = []  # Track temp files for cleanup after streaming
         
         # Process files one by one
         for i, file_id in enumerate(file_ids):
@@ -128,25 +129,25 @@ async def stream_zip_archive(batch_id: str) -> AsyncGenerator[bytes, None]:
                 # Add the temporary file to the ZIP stream
                 try:
                     zip_stream.add_path(temp_file_path, arcname=filename_in_zip)
+                    temp_files_to_cleanup.append(temp_file_path)  # Track for later cleanup
+                    print(f"[ZIP_STREAM] Successfully added {filename_in_zip} to ZIP stream")
                 except Exception as e:
                     print(f"[ZIP_STREAM] Failed to add {filename_in_zip} to ZIP: {e}")
                     # Add error file instead
                     error_content = f"Failed to add file to ZIP: {str(e)}"
                     zip_stream.add_data(f"ERROR_adding_{filename_in_zip}.txt", error_content.encode('utf-8'))
+                    # Clean up failed temp file immediately
+                    try:
+                        os.remove(temp_file_path)
+                    except:
+                        pass
             else:
                 # Add error file for failed downloads
                 print(f"[ZIP_STREAM] Failed to download {filename_in_zip}: {error_msg}")
                 error_content = f"Failed to download file: {error_msg}"
                 zip_stream.add_data(f"ERROR_downloading_{filename_in_zip}.txt", error_content.encode('utf-8'))
-            
-            # Clean up temp file immediately to save disk space
-            try:
-                if os.path.exists(temp_file_path):
-                    os.remove(temp_file_path)
-            except Exception as e:
-                print(f"[ZIP_STREAM] Warning: Failed to clean up temp file {temp_file_path}: {e}")
         
-        print(f"[ZIP_STREAM] Starting ZIP stream output for batch {batch_id}")
+        print(f"[ZIP_STREAM] Starting ZIP stream output for batch {batch_id} with {len(temp_files_to_cleanup)} files")
         
         # Stream the ZIP data in chunks
         try:
@@ -160,6 +161,17 @@ async def stream_zip_archive(batch_id: str) -> AsyncGenerator[bytes, None]:
             print(f"[ZIP_STREAM] Error during ZIP streaming: {e}")
             error_msg = f"Error during ZIP creation: {str(e)}"
             yield error_msg.encode('utf-8')
+        
+        finally:
+            # Clean up temp files AFTER streaming is complete
+            print(f"[ZIP_STREAM] Cleaning up {len(temp_files_to_cleanup)} temporary files")
+            for temp_file_path in temp_files_to_cleanup:
+                try:
+                    if os.path.exists(temp_file_path):
+                        os.remove(temp_file_path)
+                        print(f"[ZIP_STREAM] Cleaned up temp file: {os.path.basename(temp_file_path)}")
+                except Exception as e:
+                    print(f"[ZIP_STREAM] Warning: Failed to clean up temp file {temp_file_path}: {e}")
 
 # Legacy function kept for backward compatibility (but now uses new implementation)
 async def stream_file_content(file_doc: dict) -> AsyncGenerator[bytes, None]:
