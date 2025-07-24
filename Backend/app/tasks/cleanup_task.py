@@ -3,7 +3,7 @@ import os
 import logging
 from app.db.mongodb import db
 from app.models.file import UploadStatus
-from app.config import settings
+from app.core.config import settings
 
 # Configure logging
 logger = logging.getLogger("cleanup_task")
