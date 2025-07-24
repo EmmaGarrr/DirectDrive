@@ -598,7 +598,8 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
                         if not chunk: continue
                     except Exception as e:
                         # WebSocket disconnection (user cancelled)
-                        print(f"[{file_id}] WebSocket disconnected during upload: {e}")
+                        print(f"[UPLOAD_CANCEL] File: {file_id} | User cancelled upload | Reason: {e}")
+                        print(f"[UPLOAD_CANCEL] Progress: {bytes_sent}/{total_size} bytes ({int((bytes_sent/total_size)*100) if total_size > 0 else 0}%)")
                         upload_cancelled = True
                         break
                     
@@ -613,25 +614,30 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
                     bytes_sent += len(chunk)
                     await websocket.send_json({"type": "progress", "value": int((bytes_sent / total_size) * 100)})
 
-            # Get final GDrive ID from the last response
-            gdrive_response_data = response.json() if 'response' in locals() and response else {}
-            gdrive_id = gdrive_response_data.get('id')
-            if not gdrive_id and total_size > 0:
-                raise Exception("Upload to GDrive succeeded, but no file ID was returned.")
+            # Only complete the upload if it wasn't cancelled
+            if not upload_cancelled:
+                # Get final GDrive ID from the last response
+                gdrive_response_data = response.json() if 'response' in locals() and response else {}
+                gdrive_id = gdrive_response_data.get('id')
+                if not gdrive_id and total_size > 0:
+                    raise Exception("Upload to GDrive succeeded, but no file ID was returned.")
 
-            db.files.update_one({"_id": file_id}, {"$set": {"gdrive_id": gdrive_id, "status": UploadStatus.COMPLETED, "storage_location": StorageLocation.GDRIVE }})
-            
-            # UPDATE USER STORAGE USAGE
-            if file_doc.get("owner_id"):
-                db.users.update_one(
-                    {"_id": file_doc["owner_id"]},
-                    {"$inc": {"storage_used_bytes": file_doc["size_bytes"]}}
-                )
-            
-            await websocket.send_json({"type": "success", "value": f"/api/v1/download/stream/{file_id}"})
-            
-            print(f"[MAIN] Triggering silent Hetzner backup for file_id: {file_id}")
-            asyncio.create_task(run_controlled_backup(file_id))
+                db.files.update_one({"_id": file_id}, {"$set": {"gdrive_id": gdrive_id, "status": UploadStatus.COMPLETED, "storage_location": StorageLocation.GDRIVE }})
+                
+                # UPDATE USER STORAGE USAGE
+                if file_doc.get("owner_id"):
+                    db.users.update_one(
+                        {"_id": file_doc["owner_id"]},
+                        {"$inc": {"storage_used_bytes": file_doc["size_bytes"]}}
+                    )
+                
+                await websocket.send_json({"type": "success", "value": f"/api/v1/download/stream/{file_id}"})
+                
+                print(f"[MAIN] Triggering silent Hetzner backup for file_id: {file_id}")
+                asyncio.create_task(run_controlled_backup(file_id))
+                print(f"[UPLOAD_SUCCESS] File {file_id} upload completed successfully")
+            else:
+                print(f"[UPLOAD_CANCEL] Skipping upload completion logic - upload was cancelled")
 
         except Exception as e:
             print(f"!!! [{file_id}] Upload proxy failed: {e}")
@@ -643,8 +649,11 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
             
             # Update file status based on failure reason
             if upload_cancelled:
+                print(f"[UPLOAD_CANCEL] Updating database status to 'cancelled' for file: {file_id}")
                 db.files.update_one({"_id": file_id}, {"$set": {"status": "cancelled"}})
+                print(f"[UPLOAD_CANCEL] File {file_id} successfully marked as cancelled in database")
             else:
+                print(f"[UPLOAD_ERROR] Updating database status to 'failed' for file: {file_id}")
                 db.files.update_one({"_id": file_id}, {"$set": {"status": UploadStatus.FAILED}})
         finally:
             # Release rate limit for anonymous uploads
@@ -652,6 +661,13 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
                 ip = websocket.client.host
                 from app.services.rate_limiter import rate_limiter
                 await rate_limiter.release_upload(ip)
+                if upload_cancelled:
+                    print(f"[UPLOAD_CANCEL] Released rate limit for IP: {ip} after cancellation")
+            
+            # Log final cleanup
+            if upload_cancelled:
+                print(f"[UPLOAD_CANCEL] Complete cleanup finished for file: {file_id}")
+            
             await websocket.close()
 
 # Include other routers
