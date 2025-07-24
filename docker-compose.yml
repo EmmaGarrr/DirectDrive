@@ -13,49 +13,6 @@ services:
     networks:
       - uploader-net
 
-# services:
-#   # This is your backend application service
-#   app:
-#     # Tells Docker Compose to build the image from the Dockerfile in the ./Backend directory
-#     build: ./Backend
-#     # Exposes the container's port 5000 to your local machine's port 5000
-#     # Format is <host_port>:<container_port>
-#     ports:
-#       - "5000:5000"
-#     # Loads environment variables from the .env file located in the ./Backend directory
-#     env_file:
-#       - ./Backend/.env
-#     # This makes the 'app' service dependent on the 'redis' service.
-#     # It ensures Redis starts up before your application does.
-#     volumes:
-#       # Mounts the local Backend directory to the /app directory in the container
-#       # This means your local code is used directly, no need to rebuild for code changes!
-#       - ./Backend:/app
-#     depends_on:
-#       - redis
-#     # Attaches this service to our custom network
-#     networks:
-#       - uploader-net
-
-  # # This is the Redis service
-  # redis:
-  #   # Pulls the official Redis image (version 7) from Docker Hub
-  #   image: "redis:7"
-  #   # Exposes the Redis port to your local machine for debugging if needed
-  #   ports:
-  #     - "6379:6379"
-  #   # This creates a persistent storage volume for Redis data.
-  #   # Your Celery tasks won't get lost if you restart the containers.
-  #   volumes:
-  #     - redis-data:/data
-  #   # Attaches this service to our custom network
-  #   networks:
-  #     - uploader-net
-
-# # Defines the persistent volume for Redis
-# volumes:
-#   redis-data:
-
 # Defines the network that our services will use to communicate
 networks:
   uploader-net:
