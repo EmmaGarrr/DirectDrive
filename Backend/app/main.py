@@ -581,16 +581,26 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
         if not file_doc: await websocket.close(code=1008, reason="File ID not found"); return
         if not gdrive_url: await websocket.close(code=1008, reason="gdrive_url query parameter is missing."); return
         
+        # Mark upload as started
+        db.files.update_one({"_id": file_id}, {"$set": {"status": UploadStatus.UPLOADING_TO_DRIVE}})
+        
         total_size = file_doc.get("size_bytes", 0)
         
+        upload_cancelled = False
         try:
             # Simplified upload proxy logic
             async with httpx.AsyncClient(timeout=None) as client:
                 bytes_sent = 0
                 while bytes_sent < total_size:
-                    message = await websocket.receive()
-                    chunk = message.get("bytes")
-                    if not chunk: continue
+                    try:
+                        message = await websocket.receive()
+                        chunk = message.get("bytes")
+                        if not chunk: continue
+                    except Exception as e:
+                        # WebSocket disconnection (user cancelled)
+                        print(f"[{file_id}] WebSocket disconnected during upload: {e}")
+                        upload_cancelled = True
+                        break
                     
                     start_byte = bytes_sent
                     end_byte = bytes_sent + len(chunk) - 1
@@ -625,8 +635,17 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
 
         except Exception as e:
             print(f"!!! [{file_id}] Upload proxy failed: {e}")
-            await websocket.send_json({"type": "error", "value": str(e)})
-            db.files.update_one({"_id": file_id}, {"$set": {"status": UploadStatus.FAILED}})
+            # Only send error message if WebSocket is still connected
+            try:
+                await websocket.send_json({"type": "error", "value": str(e)})
+            except:
+                print(f"[{file_id}] Could not send error message, WebSocket disconnected")
+            
+            # Update file status based on failure reason
+            if upload_cancelled:
+                db.files.update_one({"_id": file_id}, {"$set": {"status": "cancelled"}})
+            else:
+                db.files.update_one({"_id": file_id}, {"$set": {"status": UploadStatus.FAILED}})
         finally:
             # Release rate limit for anonymous uploads
             if file_doc and file_doc.get("owner_id") is None:  # Anonymous upload
