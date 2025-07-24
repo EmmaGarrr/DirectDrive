@@ -597,15 +597,15 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
                         chunk = message.get("bytes")
                         if not chunk: continue
                     except Exception as e:
-                        # WebSocket disconnection (user cancelled or connection lost)
-                        error_msg = str(e).lower()
-                        if 'disconnect' in error_msg or 'close' in error_msg or bytes_sent < total_size:
-                            # Likely user cancellation if upload incomplete
-                            print(f"[UPLOAD_CANCEL] File: {file_id} | User cancelled upload | Reason: {e}")
+                        # WebSocket disconnection - if upload incomplete, treat as cancellation
+                        if bytes_sent < total_size:
+                            # Upload incomplete = user cancellation
+                            print(f"[UPLOAD_CANCEL] File: {file_id} | User cancelled upload | Reason: {e or 'WebSocket closed'}")
                             print(f"[UPLOAD_CANCEL] Progress: {bytes_sent}/{total_size} bytes ({int((bytes_sent/total_size)*100) if total_size > 0 else 0}%)")
                             upload_cancelled = True
                         else:
-                            print(f"[UPLOAD_ERROR] File: {file_id} | Connection error | Reason: {e}")
+                            # Upload complete but still got exception
+                            print(f"[UPLOAD_ERROR] File: {file_id} | Connection error after completion | Reason: {e}")
                         break
                     
                     start_byte = bytes_sent
