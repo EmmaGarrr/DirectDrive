@@ -107,7 +107,7 @@ async def stream_zip_archive(batch_id: str) -> AsyncGenerator[bytes, None]:
     
     async with MemoryEfficientZipStreamer() as streamer:
         # Create ZipStream instance for true streaming
-        zip_stream = ZipStream(compress_level=6, allowZip64=True)
+        zip_stream = ZipStream(compress_level=6)
         
         # Process files one by one
         for i, file_id in enumerate(file_ids):
