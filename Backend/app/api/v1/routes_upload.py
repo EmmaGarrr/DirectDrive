@@ -29,8 +29,14 @@ async def initiate_upload(
     # GET CLIENT IP
     client_ip = client_request.client.host
     
-    # CHECK UPLOAD SIZE LIMIT (2GB per upload)
-    size_allowed, size_message = await rate_limiter.check_upload_size_limit(request.size)
+    # CHECK UPLOAD SIZE LIMIT - Dynamic based on authentication
+    # Authenticated users: 10GB, Anonymous users: 2GB
+    if current_user:
+        max_size = 10737418240  # 10GB for authenticated users
+        size_allowed, size_message = await rate_limiter.check_authenticated_upload_size_limit(request.size, max_size)
+    else:
+        size_allowed, size_message = await rate_limiter.check_upload_size_limit(request.size)
+    
     if not size_allowed:
         raise HTTPException(status_code=413, detail=size_message)
     

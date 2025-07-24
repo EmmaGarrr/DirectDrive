@@ -179,9 +179,15 @@ async def initiate_batch_upload(
     # GET CLIENT IP
     client_ip = client_request.client.host
     
-    # CHECK BATCH UPLOAD SIZE LIMIT (2GB total for all files)
+    # CHECK BATCH UPLOAD SIZE LIMIT - Dynamic based on authentication
+    # Authenticated users: 10GB, Anonymous users: 2GB
     file_sizes = [file_info.size for file_info in request.files]
-    batch_size_allowed, batch_size_message = await rate_limiter.check_batch_upload_size_limit(file_sizes)
+    if current_user:
+        max_size = 10737418240  # 10GB for authenticated users
+        batch_size_allowed, batch_size_message = await rate_limiter.check_authenticated_batch_upload_size_limit(file_sizes, max_size)
+    else:
+        batch_size_allowed, batch_size_message = await rate_limiter.check_batch_upload_size_limit(file_sizes)
+    
     if not batch_size_allowed:
         raise HTTPException(status_code=413, detail=batch_size_message)
     

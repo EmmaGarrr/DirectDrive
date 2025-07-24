@@ -14,21 +14,40 @@ class UploadRateLimiter:
         
     async def check_upload_size_limit(self, file_size: int) -> Tuple[bool, str]:
         """
-        Check if a single file upload exceeds 2GB limit.
+        Check if a single file upload exceeds 2GB limit (for anonymous users).
         """
         max_size = 2147483648  # 2GB in bytes
         if file_size > max_size:
             return False, f"File size {file_size} bytes exceeds maximum allowed size of {max_size} bytes (2GB)"
         return True, "OK"
     
+    async def check_authenticated_upload_size_limit(self, file_size: int, max_size: int) -> Tuple[bool, str]:
+        """
+        Check if a single file upload exceeds specified limit (for authenticated users).
+        """
+        if file_size > max_size:
+            max_gb = max_size / 1073741824  # Convert to GB
+            return False, f"File size {file_size} bytes exceeds maximum allowed size of {max_size} bytes ({max_gb:.0f}GB)"
+        return True, "OK"
+    
     async def check_batch_upload_size_limit(self, file_sizes: List[int]) -> Tuple[bool, str]:
         """
-        Check if batch upload total size exceeds 2GB limit.
+        Check if batch upload total size exceeds 2GB limit (for anonymous users).
         """
         total_size = sum(file_sizes)
         max_size = 2147483648  # 2GB in bytes
         if total_size > max_size:
             return False, f"Total batch size {total_size} bytes exceeds maximum allowed size of {max_size} bytes (2GB)"
+        return True, "OK"
+        
+    async def check_authenticated_batch_upload_size_limit(self, file_sizes: List[int], max_size: int) -> Tuple[bool, str]:
+        """
+        Check if batch upload total size exceeds specified limit (for authenticated users).
+        """
+        total_size = sum(file_sizes)
+        if total_size > max_size:
+            max_gb = max_size / 1073741824  # Convert to GB
+            return False, f"Total batch size {total_size} bytes exceeds maximum allowed size of {max_size} bytes ({max_gb:.0f}GB)"
         return True, "OK"
         
     async def check_rate_limit(self, ip: str, file_size: int) -> Tuple[bool, str]:
