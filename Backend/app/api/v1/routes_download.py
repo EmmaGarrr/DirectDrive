@@ -337,7 +337,7 @@ from app.db.mongodb import db
 from app.services.google_drive_service import gdrive_pool_manager, async_stream_gdrive_file
 from app.models.file import FileMetadataInDB, StorageLocation
 # Import download semaphore for resource protection
-from app.main import download_semaphore
+from app.core.shared_resources import download_semaphore
 
 router = APIRouter()
 

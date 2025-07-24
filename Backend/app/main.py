@@ -382,12 +382,8 @@ from app.models.file import UploadStatus, StorageLocation
 from app.core.config import settings
 from app.services import backup_service
 
-# --- FINAL FIX: CONCURRENCY LIMITER FOR BACKGROUND TASKS ---
-# This creates a "gate" that only allows 2 backup tasks to run at a time.
-# Others will wait politely in a queue.
-BACKUP_TASK_SEMAPHORE = asyncio.Semaphore(1)
-# --- END OF FINAL FIX ---
-# # --- END OF FINAL FIX ---
+# Import shared resources
+from app.core.shared_resources import backup_task_semaphore as BACKUP_TASK_SEMAPHORE
 
 # class ConnectionManager:
 #     def __init__(self):
