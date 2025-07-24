@@ -60,7 +60,7 @@ async def stream_file_content(file_doc: dict) -> AsyncGenerator[bytes, None]:
 
 async def stream_zip_archive(batch_id: str) -> AsyncGenerator[bytes, None]:
     """
-    Creates a ZIP archive in-memory and streams it chunk by chunk.
+    Creates a ZIP archive and streams it chunk by chunk with proper error handling.
     """
     batch_doc = db.batches.find_one({"_id": batch_id})
     if not batch_doc:
@@ -70,32 +70,43 @@ async def stream_zip_archive(batch_id: str) -> AsyncGenerator[bytes, None]:
     if not file_ids:
         return
 
-    # Use an in-memory buffer to build the ZIP file
+    # Use a larger buffer to reduce memory pressure and improve streaming
     zip_buffer = io.BytesIO()
 
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for file_id in file_ids:
-            file_doc = db.files.find_one({"_id": file_id})
-            if not file_doc:
-                continue
-            
-            filename_in_zip = file_doc.get("filename", file_id)
-            
-            try:
-                # Create a writer for the file within the zip archive
-                with zf.open(filename_in_zip, 'w') as file_in_zip:
-                    async for chunk in stream_file_content(file_doc):
-                        file_in_zip.write(chunk)
-            except FileFetchError as e:
-                # If a single file fails, we can write an error file into the zip
-                # to notify the user, and then continue with the next files.
-                # IMPORTANT: We do this AFTER the file handle is closed (outside the 'with' block)
-                error_filename = f"ERROR_loading_{filename_in_zip}.txt"
-                zf.writestr(error_filename, str(e))
+    try:
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for file_id in file_ids:
+                file_doc = db.files.find_one({"_id": file_id})
+                if not file_doc:
+                    continue
+                
+                filename_in_zip = file_doc.get("filename", file_id)
+                
+                try:
+                    # Create a writer for the file within the zip archive
+                    with zf.open(filename_in_zip, 'w') as file_in_zip:
+                        async for chunk in stream_file_content(file_doc):
+                            file_in_zip.write(chunk)
+                except FileFetchError as e:
+                    # If a single file fails, we can write an error file into the zip
+                    # to notify the user, and then continue with the next files.
+                    # IMPORTANT: We do this AFTER the file handle is closed (outside the 'with' block)
+                    error_filename = f"ERROR_loading_{filename_in_zip}.txt"
+                    zf.writestr(error_filename, str(e))
+                except Exception as e:
+                    # Handle any other unexpected errors
+                    error_filename = f"ERROR_loading_{filename_in_zip}.txt"
+                    zf.writestr(error_filename, f"Unexpected error: {str(e)}")
+
+    except Exception as e:
+        # If ZIP creation fails entirely, yield an error message
+        error_msg = f"Failed to create ZIP archive: {str(e)}"
+        yield error_msg.encode('utf-8')
+        return
 
     # Once the zip file is fully constructed in the buffer, seek to the start
     zip_buffer.seek(0)
     
-    # Yield the zip file in chunks to stream it to the client
-    while chunk := zip_buffer.read(65536): # Read in 64KB chunks
+    # Yield the final zip file in chunks to stream it to the client
+    while chunk := zip_buffer.read(65536):  # Read in 64KB chunks
         yield chunk

@@ -272,11 +272,19 @@ async def get_batch_files_metadata(batch_id: str):
 
 @router.get("/download-zip/{batch_id}")
 async def download_batch_as_zip(batch_id: str):
+    # Verify batch exists first
+    batch_doc = db.batches.find_one({"_id": batch_id})
+    if not batch_doc:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    
     zip_filename = f"batch_{batch_id}.zip"
     headers = {
-        'Content-Disposition': f'attachment; filename="{zip_filename}"'
+        'Content-Disposition': f'attachment; filename="{zip_filename}"',
+        'Content-Type': 'application/zip',
+        'Cache-Control': 'no-cache',
+        'Accept-Ranges': 'bytes'
     }
-    # The zipping service will now need to handle getting the right account for each file
+    
     return StreamingResponse(
         zipping_service.stream_zip_archive(batch_id),
         media_type="application/zip",
