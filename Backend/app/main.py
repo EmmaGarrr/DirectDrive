@@ -597,10 +597,15 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
                         chunk = message.get("bytes")
                         if not chunk: continue
                     except Exception as e:
-                        # WebSocket disconnection (user cancelled)
-                        print(f"[UPLOAD_CANCEL] File: {file_id} | User cancelled upload | Reason: {e}")
-                        print(f"[UPLOAD_CANCEL] Progress: {bytes_sent}/{total_size} bytes ({int((bytes_sent/total_size)*100) if total_size > 0 else 0}%)")
-                        upload_cancelled = True
+                        # WebSocket disconnection (user cancelled or connection lost)
+                        error_msg = str(e).lower()
+                        if 'disconnect' in error_msg or 'close' in error_msg or bytes_sent < total_size:
+                            # Likely user cancellation if upload incomplete
+                            print(f"[UPLOAD_CANCEL] File: {file_id} | User cancelled upload | Reason: {e}")
+                            print(f"[UPLOAD_CANCEL] Progress: {bytes_sent}/{total_size} bytes ({int((bytes_sent/total_size)*100) if total_size > 0 else 0}%)")
+                            upload_cancelled = True
+                        else:
+                            print(f"[UPLOAD_ERROR] File: {file_id} | Connection error | Reason: {e}")
                         break
                     
                     start_byte = bytes_sent
@@ -668,7 +673,12 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
             if upload_cancelled:
                 print(f"[UPLOAD_CANCEL] Complete cleanup finished for file: {file_id}")
             
-            await websocket.close()
+            # Close WebSocket safely (avoid double close)
+            try:
+                if websocket.client_state.name != 'DISCONNECTED':
+                    await websocket.close()
+            except Exception as close_error:
+                print(f"[DEBUG] WebSocket already closed or error closing: {close_error}")
 
 # Include other routers
 app.include_router(routes_auth.router, prefix="/api/v1/auth", tags=["Authentication"])
