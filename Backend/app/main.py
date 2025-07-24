@@ -587,10 +587,10 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
         total_size = file_doc.get("size_bytes", 0)
         
         upload_cancelled = False
+        bytes_sent = 0  # Move outside httpx block for proper scope
         try:
             # Simplified upload proxy logic
             async with httpx.AsyncClient(timeout=None) as client:
-                bytes_sent = 0
                 while bytes_sent < total_size:
                     try:
                         message = await websocket.receive()
