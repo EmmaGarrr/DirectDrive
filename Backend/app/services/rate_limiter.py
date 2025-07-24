@@ -1,7 +1,7 @@
 from collections import defaultdict
 from datetime import datetime, timedelta
 import asyncio
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 
 class UploadRateLimiter:
     def __init__(self):
@@ -11,6 +11,25 @@ class UploadRateLimiter:
         )
         self.active_uploads: Dict[str, int] = defaultdict(int)
         self._lock = asyncio.Lock()
+        
+    async def check_upload_size_limit(self, file_size: int) -> Tuple[bool, str]:
+        """
+        Check if a single file upload exceeds 2GB limit.
+        """
+        max_size = 2147483648  # 2GB in bytes
+        if file_size > max_size:
+            return False, f"File size {file_size} bytes exceeds maximum allowed size of {max_size} bytes (2GB)"
+        return True, "OK"
+    
+    async def check_batch_upload_size_limit(self, file_sizes: List[int]) -> Tuple[bool, str]:
+        """
+        Check if batch upload total size exceeds 2GB limit.
+        """
+        total_size = sum(file_sizes)
+        max_size = 2147483648  # 2GB in bytes
+        if total_size > max_size:
+            return False, f"Total batch size {total_size} bytes exceeds maximum allowed size of {max_size} bytes (2GB)"
+        return True, "OK"
         
     async def check_rate_limit(self, ip: str, file_size: int) -> Tuple[bool, str]:
         async with self._lock:

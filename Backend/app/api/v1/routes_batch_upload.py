@@ -1,24 +1,24 @@
-# # File: Backend/app/api/v1/routes_batch_upload.py
+# File: Backend/app/api/v1/routes_batch_upload.py
 
-# import uuid
-# from typing import Optional
-# from fastapi.responses import StreamingResponse
-# from fastapi import APIRouter, HTTPException, Depends
-# from typing import Optional, List
+import uuid
+from typing import Optional, List
+from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Depends, Request
 
-# # Models for our new batch functionality and for existing files/users
-# from app.models.batch import BatchMetadata, InitiateBatchRequest, InitiateBatchResponse
-# from app.models.file import FileMetadataCreate, UploadStatus, FileMetadataInDB
-# from app.models.user import UserInDB
+# Models for our new batch functionality and for existing files/users
+from app.models.batch import BatchMetadata, InitiateBatchRequest, InitiateBatchResponse
+from app.models.file import FileMetadataCreate, UploadStatus, FileMetadataInDB
+from app.models.user import UserInDB
 
-# # Database access and other services
-# from app.db.mongodb import db
-# from app.services.auth_service import get_current_user_optional
-# from app.services import google_drive_service
-# from app.services import zipping_service
+# Database access and other services
+from app.db.mongodb import db
+from app.services.auth_service import get_current_user_optional
+from app.services import google_drive_service
+from app.services import zipping_service
+from app.services.rate_limiter import rate_limiter
 
-# # This new router will handle all API calls related to batch processing.
-# router = APIRouter()
+# This new router will handle all API calls related to batch processing.
+router = APIRouter()
 
 
 # @router.post("/initiate", response_model=InitiateBatchResponse)
@@ -173,8 +173,26 @@ router = APIRouter()
 @router.post("/initiate", response_model=InitiateBatchResponse)
 async def initiate_batch_upload(
     request: InitiateBatchRequest,
+    client_request: Request,
     current_user: Optional[UserInDB] = Depends(get_current_user_optional)
 ):
+    # GET CLIENT IP
+    client_ip = client_request.client.host
+    
+    # CHECK BATCH UPLOAD SIZE LIMIT (2GB total for all files)
+    file_sizes = [file_info.size for file_info in request.files]
+    batch_size_allowed, batch_size_message = await rate_limiter.check_batch_upload_size_limit(file_sizes)
+    if not batch_size_allowed:
+        raise HTTPException(status_code=413, detail=batch_size_message)
+    
+    # Calculate total batch size for rate limiting
+    total_batch_size = sum(file_sizes)
+    
+    # CHECK RATE LIMIT FOR BATCH UPLOAD
+    allowed, message = await rate_limiter.check_rate_limit(client_ip, total_batch_size)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=message)
+    
     # --- NEW: Get an active account from the pool for the entire batch ---
     active_account = await gdrive_pool_manager.get_active_account()
     if not active_account:
@@ -183,11 +201,9 @@ async def initiate_batch_upload(
     batch_id = str(uuid.uuid4())
     file_upload_info_list = []
     file_ids_for_batch = []
-    total_batch_size = 0
 
     for file_info in request.files:
         file_id = str(uuid.uuid4())
-        total_batch_size += file_info.size
 
         try:
             # --- MODIFIED: Pass the same active account for every file in the batch ---
