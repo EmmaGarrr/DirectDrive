@@ -272,21 +272,41 @@ async def get_batch_files_metadata(batch_id: str):
 
 @router.get("/download-zip/{batch_id}")
 async def download_batch_as_zip(batch_id: str):
+    from app.core.concurrency_config import concurrency_manager
+    
     # Verify batch exists first
     batch_doc = db.batches.find_one({"_id": batch_id})
     if not batch_doc:
         raise HTTPException(status_code=404, detail="Batch not found")
+    
+    # Check if we can handle another ZIP operation
+    can_proceed = await concurrency_manager.acquire_zip_slot(batch_id)
+    if not can_proceed:
+        raise HTTPException(
+            status_code=503, 
+            detail="Server is currently busy processing other ZIP downloads. Please try again in a few minutes."
+        )
     
     zip_filename = f"batch_{batch_id}.zip"
     headers = {
         'Content-Disposition': f'attachment; filename="{zip_filename}"',
         'Content-Type': 'application/zip',
         'Cache-Control': 'no-cache',
-        'Accept-Ranges': 'bytes'
+        'Accept-Ranges': 'bytes',
+        'Connection': 'keep-alive'
     }
     
+    async def controlled_zip_stream():
+        """Wrapper that ensures proper cleanup of concurrency slot"""
+        try:
+            async for chunk in zipping_service.stream_zip_archive(batch_id):
+                yield chunk
+        finally:
+            # Always release the slot when done
+            concurrency_manager.release_zip_slot(batch_id)
+    
     return StreamingResponse(
-        zipping_service.stream_zip_archive(batch_id),
+        controlled_zip_stream(),
         media_type="application/zip",
         headers=headers
     )

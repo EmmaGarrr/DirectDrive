@@ -126,6 +126,8 @@ google-auth-oauthlib
 # Other Utilities
 httpx
 zipstream-ng
+aiofiles
+psutil
 # --- REMOVED: python-telegram-bot ---
 
 # Process Management
