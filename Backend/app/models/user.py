@@ -10,6 +10,8 @@ class UserCreate(UserBase):
 class UserInDB(UserBase):
     id: str = Field(..., alias="_id")
     hashed_password: str
+    storage_used_bytes: int = Field(default=0)  # Track used storage
+    storage_limit_bytes: int = Field(default=2147483648)  # 2GB default limit
 
     class Config:
         populate_by_name = True
