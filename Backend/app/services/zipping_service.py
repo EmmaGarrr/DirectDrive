@@ -24,10 +24,22 @@ async def stream_file_content(file_doc: dict) -> AsyncGenerator[bytes, None]:
     try:
         if storage_location == "gdrive":
             gdrive_id = file_doc.get("gdrive_id")
+            gdrive_account_id = file_doc.get("gdrive_account_id")
             if not gdrive_id:
                 raise FileFetchError(f"File {file_id} is in GDrive but ID is missing.")
             
-            async for chunk in google_drive_service.async_stream_gdrive_file(gdrive_id):
+            # Get the account configuration for this file
+            account = None
+            if gdrive_account_id:
+                account = google_drive_service.gdrive_pool_manager.get_account_by_id(gdrive_account_id)
+            
+            # Fall back to active account if specific account not found
+            if not account:
+                account = await google_drive_service.gdrive_pool_manager.get_active_account()
+                if not account:
+                    raise FileFetchError(f"No Google Drive account available for file {file_id}")
+            
+            async for chunk in google_drive_service.async_stream_gdrive_file(gdrive_id, account):
                 yield chunk
 
         # elif storage_location == "telegram":
@@ -69,16 +81,17 @@ async def stream_zip_archive(batch_id: str) -> AsyncGenerator[bytes, None]:
             
             filename_in_zip = file_doc.get("filename", file_id)
             
-            # Create a writer for the file within the zip archive
-            with zf.open(filename_in_zip, 'w') as file_in_zip:
-                try:
+            try:
+                # Create a writer for the file within the zip archive
+                with zf.open(filename_in_zip, 'w') as file_in_zip:
                     async for chunk in stream_file_content(file_doc):
                         file_in_zip.write(chunk)
-                except FileFetchError as e:
-                    # If a single file fails, we can write an error file into the zip
-                    # to notify the user, and then continue with the next files.
-                    error_filename = f"ERROR_loading_{filename_in_zip}.txt"
-                    zf.writestr(error_filename, str(e))
+            except FileFetchError as e:
+                # If a single file fails, we can write an error file into the zip
+                # to notify the user, and then continue with the next files.
+                # IMPORTANT: We do this AFTER the file handle is closed (outside the 'with' block)
+                error_filename = f"ERROR_loading_{filename_in_zip}.txt"
+                zf.writestr(error_filename, str(e))
 
     # Once the zip file is fully constructed in the buffer, seek to the start
     zip_buffer.seek(0)
