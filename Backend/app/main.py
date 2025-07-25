@@ -156,8 +156,10 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
                 
                 while bytes_sent < total_size:
                     try:
-                        message = await websocket.receive()
+                        # Add timeout to websocket.receive() to detect disconnects faster
+                        message = await asyncio.wait_for(websocket.receive(), timeout=5.0)
                         chunk = message.get("bytes")
+                        
                         if not chunk: 
                             print(f"[UPLOAD_DEBUG] File: {file_id} | Received empty chunk, continuing")
                             continue
@@ -167,17 +169,33 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
                             print(f"[UPLOAD_PROGRESS] File: {file_id} | Chunk #{chunk_count} | Progress: {bytes_sent}/{total_size} bytes")
                             sys.stdout.flush()
                             
+                    except asyncio.TimeoutError:
+                        # Check if WebSocket is still connected
+                        if websocket.client_state.name == 'DISCONNECTED':
+                            print(f"[UPLOAD_CANCEL] File: {file_id} | WebSocket disconnected (timeout detection) | User cancelled upload")
+                            print(f"[UPLOAD_CANCEL] Progress: {bytes_sent}/{total_size} bytes ({int((bytes_sent/total_size)*100) if total_size > 0 else 0}%) | Chunks processed: {chunk_count}")
+                            sys.stdout.flush()
+                            upload_cancelled = True
+                            break
+                        else:
+                            # Still connected, continue waiting
+                            print(f"[UPLOAD_DEBUG] File: {file_id} | Receive timeout but WebSocket still connected")
+                            continue
+                            
                     except Exception as e:
                         # WebSocket disconnection - if upload incomplete, treat as cancellation
+                        error_type = type(e).__name__
+                        print(f"[UPLOAD_CANCEL] File: {file_id} | WebSocket error detected immediately | Error: {error_type}: {e}")
+                        
                         if bytes_sent < total_size:
                             # Upload incomplete = user cancellation
-                            print(f"[UPLOAD_CANCEL] File: {file_id} | User cancelled upload | Reason: {e or 'WebSocket closed'}")
+                            print(f"[UPLOAD_CANCEL] File: {file_id} | User cancelled upload | Reason: {error_type}")
                             print(f"[UPLOAD_CANCEL] Progress: {bytes_sent}/{total_size} bytes ({int((bytes_sent/total_size)*100) if total_size > 0 else 0}%) | Chunks processed: {chunk_count}")
                             sys.stdout.flush()
                             upload_cancelled = True
                         else:
                             # Upload complete but still got exception
-                            print(f"[UPLOAD_ERROR] File: {file_id} | Connection error after completion | Reason: {e}")
+                            print(f"[UPLOAD_ERROR] File: {file_id} | Connection error after completion | Reason: {error_type}: {e}")
                             sys.stdout.flush()
                         break
                     

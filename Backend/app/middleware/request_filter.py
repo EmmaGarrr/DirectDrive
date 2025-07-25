@@ -143,9 +143,30 @@ class RequestFilterMiddleware:
         except Exception as e:
             # Catch and suppress common WebSocket parsing errors that cause log spam
             error_msg = str(e).lower()
-            if any(err in error_msg for err in ['invalid http request', 'websocket', 'upgrade']):
-                # Suppress these specific errors that are caused by bot probes
-                print(f"[WEBSOCKET_FILTER] Suppressed invalid request error: {type(e).__name__}")
+            error_type = type(e).__name__
+            
+            # More comprehensive error suppression
+            if any(err in error_msg for err in [
+                'invalid http request', 'websocket', 'upgrade', 'connection', 
+                'malformed', 'bad request', 'protocol error', 'invalid frame',
+                'connection lost', 'broken pipe', 'connection reset'
+            ]):
+                # Suppress these specific errors that are caused by bot probes or malformed requests
+                print(f"[WEBSOCKET_FILTER] Suppressed invalid request error: {error_type} - {error_msg[:100]}")
+                sys.stdout.flush()
+                
+                # Send a proper close response if possible
+                try:
+                    if scope["type"] == "websocket":
+                        await self._send_websocket_close(send, 1002, "Invalid request")
+                    elif scope["type"] == "http":
+                        # Send a minimal HTTP response for malformed requests
+                        response = PlainTextResponse("Bad Request", status_code=400)
+                        await response(scope, receive, send)
+                except Exception:
+                    # If we can't send a response, just suppress the error
+                    pass
                 return
+            
             # Re-raise other exceptions
             raise
