@@ -160,28 +160,41 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
                         # Shorter timeout for faster cancel detection
                         message = await asyncio.wait_for(websocket.receive(), timeout=2.0)
                         
-                        # Check for cancellation message first
-                        if message.get("type") == "cancel":
-                            cancel_requested = True
-                            upload_cancelled = True
-                            print(f"[UPLOAD_CANCEL] File: {file_id} | Cancel request received from client | Immediate stop")
-                            print(f"[UPLOAD_CANCEL] Progress: {bytes_sent}/{total_size} bytes ({int((bytes_sent/total_size)*100) if total_size > 0 else 0}%) | Chunks processed: {chunk_count}")
-                            sys.stdout.flush()
-                            
-                            # Send acknowledgment to frontend
+                        # Handle different message types
+                        if message.get("type") == "websocket.text":
+                            # Parse JSON text message (like cancel requests)
                             try:
-                                await websocket.send_json({"type": "cancel_ack", "message": "Upload cancelled successfully"})
-                                print(f"[UPLOAD_CANCEL] File: {file_id} | Cancel acknowledgment sent to client")
-                                sys.stdout.flush()
-                            except Exception as ack_error:
-                                print(f"[UPLOAD_CANCEL] File: {file_id} | Could not send cancel ACK: {ack_error}")
-                                sys.stdout.flush()
-                            
-                            break
+                                text_data = message.get("text")
+                                if text_data:
+                                    import json
+                                    json_message = json.loads(text_data)
+                                    
+                                    # Check for cancellation message
+                                    if json_message.get("type") == "cancel":
+                                        cancel_requested = True
+                                        upload_cancelled = True
+                                        print(f"[UPLOAD_CANCEL] File: {file_id} | Cancel request received from client | Immediate stop")
+                                        print(f"[UPLOAD_CANCEL] Progress: {bytes_sent}/{total_size} bytes ({int((bytes_sent/total_size)*100) if total_size > 0 else 0}%) | Chunks processed: {chunk_count}")
+                                        sys.stdout.flush()
+                                        
+                                        # Send acknowledgment to frontend
+                                        try:
+                                            await websocket.send_json({"type": "cancel_ack", "message": "Upload cancelled successfully"})
+                                            print(f"[UPLOAD_CANCEL] File: {file_id} | Cancel acknowledgment sent to client")
+                                            sys.stdout.flush()
+                                        except Exception as ack_error:
+                                            print(f"[UPLOAD_CANCEL] File: {file_id} | Could not send cancel ACK: {ack_error}")
+                                            sys.stdout.flush()
+                                        
+                                        break
+                            except Exception as parse_error:
+                                print(f"[UPLOAD_DEBUG] File: {file_id} | Failed to parse text message: {parse_error}")
+                                continue
                         
+                        # Handle binary chunk messages
                         chunk = message.get("bytes")
                         if not chunk: 
-                            print(f"[UPLOAD_DEBUG] File: {file_id} | Received empty chunk, continuing")
+                            print(f"[UPLOAD_DEBUG] File: {file_id} | Received non-chunk message, continuing")
                             continue
                         
                         chunk_count += 1
