@@ -294,17 +294,33 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
                 sys.stdout.flush()
 
         except Exception as e:
-            print(f"[UPLOAD_ERROR] File: {file_id} | Upload proxy failed | Error: {type(e).__name__}: {e}")
-            sys.stdout.flush()
-            
-            # Only send error message if WebSocket is still connected
-            try:
-                await websocket.send_json({"type": "error", "value": str(e)})
-                print(f"[UPLOAD_ERROR] File: {file_id} | Error message sent to client")
+            # Check if this is a WebSocketDisconnect that might be a cancel request
+            if "WebSocketDisconnect" in str(type(e)) or "disconnect" in str(e).lower():
+                # This could be a cancel request - try to detect it
+                print(f"[UPLOAD_DEBUG] File: {file_id} | WebSocket disconnect detected, checking for cancel request")
                 sys.stdout.flush()
-            except Exception as send_error:
-                print(f"[UPLOAD_ERROR] File: {file_id} | Could not send error message, WebSocket disconnected | Send error: {send_error}")
+                
+                # If upload was incomplete, treat as user cancellation
+                if bytes_sent < total_size:
+                    print(f"[UPLOAD_CANCEL] File: {file_id} | WebSocket disconnect during upload - treating as user cancellation")
+                    print(f"[UPLOAD_CANCEL] Progress: {bytes_sent}/{total_size} bytes ({int((bytes_sent/total_size)*100) if total_size > 0 else 0}%) | Chunks processed: {chunk_count}")
+                    sys.stdout.flush()
+                    upload_cancelled = True
+                else:
+                    print(f"[UPLOAD_SUCCESS] File: {file_id} | Upload completed despite WebSocket disconnect")
+                    sys.stdout.flush()
+            else:
+                print(f"[UPLOAD_ERROR] File: {file_id} | Upload proxy failed | Error: {type(e).__name__}: {e}")
                 sys.stdout.flush()
+                
+                # Only send error message if WebSocket is still connected
+                try:
+                    await websocket.send_json({"type": "error", "value": str(e)})
+                    print(f"[UPLOAD_ERROR] File: {file_id} | Error message sent to client")
+                    sys.stdout.flush()
+                except Exception as send_error:
+                    print(f"[UPLOAD_ERROR] File: {file_id} | Could not send error message, WebSocket disconnected | Send error: {send_error}")
+                    sys.stdout.flush()
             
             # Robust cancellation detection: check both flag and upload completeness
             if upload_cancelled or (bytes_sent < total_size):
