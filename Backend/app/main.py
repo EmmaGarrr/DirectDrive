@@ -144,6 +144,7 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
         upload_cancelled = False
         bytes_sent = 0  # Move outside httpx block for proper scope
         chunk_count = 0
+        cancel_requested = False  # Flag for graceful cancellation
         
         print(f"[UPLOAD_PROGRESS] File: {file_id} | Starting upload loop | Total size: {total_size} bytes")
         sys.stdout.flush()
@@ -154,12 +155,31 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
                 print(f"[UPLOAD_PROGRESS] File: {file_id} | HTTP client initialized, ready to receive chunks")
                 sys.stdout.flush()
                 
-                while bytes_sent < total_size:
+                while bytes_sent < total_size and not cancel_requested:
                     try:
-                        # Add timeout to websocket.receive() to detect disconnects faster
-                        message = await asyncio.wait_for(websocket.receive(), timeout=5.0)
-                        chunk = message.get("bytes")
+                        # Shorter timeout for faster cancel detection
+                        message = await asyncio.wait_for(websocket.receive(), timeout=2.0)
                         
+                        # Check for cancellation message first
+                        if message.get("type") == "cancel":
+                            cancel_requested = True
+                            upload_cancelled = True
+                            print(f"[UPLOAD_CANCEL] File: {file_id} | Cancel request received from client | Immediate stop")
+                            print(f"[UPLOAD_CANCEL] Progress: {bytes_sent}/{total_size} bytes ({int((bytes_sent/total_size)*100) if total_size > 0 else 0}%) | Chunks processed: {chunk_count}")
+                            sys.stdout.flush()
+                            
+                            # Send acknowledgment to frontend
+                            try:
+                                await websocket.send_json({"type": "cancel_ack", "message": "Upload cancelled successfully"})
+                                print(f"[UPLOAD_CANCEL] File: {file_id} | Cancel acknowledgment sent to client")
+                                sys.stdout.flush()
+                            except Exception as ack_error:
+                                print(f"[UPLOAD_CANCEL] File: {file_id} | Could not send cancel ACK: {ack_error}")
+                                sys.stdout.flush()
+                            
+                            break
+                        
+                        chunk = message.get("bytes")
                         if not chunk: 
                             print(f"[UPLOAD_DEBUG] File: {file_id} | Received empty chunk, continuing")
                             continue
@@ -178,14 +198,13 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
                             upload_cancelled = True
                             break
                         else:
-                            # Still connected, continue waiting
-                            print(f"[UPLOAD_DEBUG] File: {file_id} | Receive timeout but WebSocket still connected")
+                            # Still connected, continue waiting for chunks
                             continue
                             
                     except Exception as e:
                         # WebSocket disconnection - if upload incomplete, treat as cancellation
                         error_type = type(e).__name__
-                        print(f"[UPLOAD_CANCEL] File: {file_id} | WebSocket error detected immediately | Error: {error_type}: {e}")
+                        print(f"[UPLOAD_CANCEL] File: {file_id} | WebSocket error detected | Error: {error_type}: {e}")
                         
                         if bytes_sent < total_size:
                             # Upload incomplete = user cancellation
