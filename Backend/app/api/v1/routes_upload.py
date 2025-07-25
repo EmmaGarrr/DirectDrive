@@ -22,6 +22,53 @@ from app.services.rate_limiter import rate_limiter
 # Configure upload logging
 upload_logger = logging.getLogger('directdrive.upload')
 
+@router.post("/upload/cancel/{file_id}", response_model=dict)
+async def cancel_upload(
+    file_id: str,
+    client_request: Request,
+    current_user: Optional[UserInDB] = Depends(get_current_user_optional)
+):
+    """Cancel an ongoing upload using out-of-band HTTP request"""
+    
+    # GET CLIENT IP
+    client_ip = client_request.client.host
+    user_id = current_user.email if current_user else client_ip
+    
+    upload_logger.info(f"Upload cancel request - User: {user_id}, File: {file_id}")
+    
+    # Check if file exists and is being uploaded
+    file_doc = db.files.find_one({"_id": file_id})
+    if not file_doc:
+        upload_logger.warning(f"Cancel request for non-existent file: {file_id}")
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    # Update file status to cancelled in database
+    result = db.files.update_one(
+        {"_id": file_id, "status": {"$in": ["uploading", "initiated"]}},
+        {
+            "$set": {
+                "status": "cancelled",
+                "cancelled_at": datetime.utcnow(),
+                "cancelled_by": user_id
+            }
+        }
+    )
+    
+    if result.modified_count > 0:
+        upload_logger.info(f"Upload successfully cancelled - User: {user_id}, File: {file_id}")
+        return {
+            "status": "success",
+            "message": "Upload cancelled successfully",
+            "file_id": file_id,
+            "cancelled_at": datetime.utcnow().isoformat()
+        }
+    else:
+        upload_logger.warning(f"Cancel request for file not in uploadable state: {file_id}, Status: {file_doc.get('status')}")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot cancel upload. File status: {file_doc.get('status')}"
+        )
+
 @router.post("/upload/initiate", response_model=dict)
 async def initiate_upload(
     request: InitiateUploadRequest,
