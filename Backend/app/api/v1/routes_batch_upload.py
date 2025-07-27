@@ -198,7 +198,7 @@ async def initiate_batch_upload(
     if current_user:
         # Authenticated users: Use email-based rate limiting with higher limits
         allowed, message = await rate_limiter.check_authenticated_rate_limit(
-            current_user.email, total_batch_size, current_user.storage_used_bytes, current_user.storage_limit_bytes
+            current_user.email, total_batch_size, current_user.storage_limit_bytes
         )
     else:
         # Anonymous users: Use IP-based rate limiting with lower limits
