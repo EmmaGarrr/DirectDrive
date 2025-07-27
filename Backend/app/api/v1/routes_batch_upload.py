@@ -194,8 +194,16 @@ async def initiate_batch_upload(
     # Calculate total batch size for rate limiting
     total_batch_size = sum(file_sizes)
     
-    # CHECK RATE LIMIT FOR BATCH UPLOAD
-    allowed, message = await rate_limiter.check_rate_limit(client_ip, total_batch_size)
+    # CHECK RATE LIMIT FOR BATCH UPLOAD - Use appropriate rate limiting based on authentication
+    if current_user:
+        # Authenticated users: Use email-based rate limiting with higher limits
+        allowed, message = await rate_limiter.check_authenticated_rate_limit(
+            current_user.email, total_batch_size, current_user.storage_used_bytes, current_user.storage_limit_bytes
+        )
+    else:
+        # Anonymous users: Use IP-based rate limiting with lower limits
+        allowed, message = await rate_limiter.check_rate_limit(client_ip, total_batch_size)
+    
     if not allowed:
         raise HTTPException(status_code=429, detail=message)
     
