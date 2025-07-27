@@ -264,7 +264,8 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
                         {"$inc": {"storage_used_bytes": file_doc["size_bytes"]}}
                     )
                 
-                await websocket.send_json({"type": "success", "value": f"/api/v1/download/stream/{file_id}"})
+                # Send frontend route path instead of API path for consistency with batch uploads
+                await websocket.send_json({"type": "success", "value": f"/download/{file_id}"})
                 
                 print(f"[UPLOAD_SUCCESS] File: {file_id} | Success message sent to client | Triggering backup")
                 sys.stdout.flush()
