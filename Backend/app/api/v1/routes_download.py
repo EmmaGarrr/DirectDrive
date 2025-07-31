@@ -202,10 +202,32 @@ async def stream_preview(
             if not storage_account:
                 raise ValueError(f"Configuration for GDrive account '{account_id}' not found.")
 
-            # For now, stream the entire file since Google Drive range requests are complex
-            # The browser will handle buffering and seeking
-            async for chunk in async_stream_gdrive_file(gdrive_id, account=storage_account):
-                yield chunk
+            # Handle range requests for proper video seeking
+            if range_header:
+                # Use Google Drive API with range headers for seeking
+                import httpx
+                from google.auth.transport.requests import Request as GoogleRequest
+                
+                # Refresh credentials if needed
+                if storage_account.creds.expired:
+                    storage_account.creds.refresh(GoogleRequest())
+                
+                # Get direct download URL from Google Drive
+                download_url = f"https://www.googleapis.com/drive/v3/files/{gdrive_id}?alt=media"
+                headers = {
+                    "Authorization": f"Bearer {storage_account.creds.token}",
+                    "Range": range_header
+                }
+                
+                async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=3600.0)) as client:
+                    async with client.stream("GET", download_url, headers=headers) as response:
+                        response.raise_for_status()
+                        async for chunk in response.aiter_bytes():
+                            yield chunk
+            else:
+                # Stream entire file for initial load
+                async for chunk in async_stream_gdrive_file(gdrive_id, account=storage_account):
+                    yield chunk
             
             print(f"[PREVIEW] Successfully streamed preview for '{filename}' from Google Drive.")
             return
@@ -242,16 +264,22 @@ async def stream_preview(
             raise HTTPException(status_code=500, detail="Preview streaming failed")
     
     # Set appropriate headers for preview streaming
-    # For video streaming, we'll always return 200 OK and let the browser handle buffering
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Type": content_type,
         "Cache-Control": "no-cache"
     }
+    
+    # Handle range requests properly for video seeking
+    if range_header:
+        headers["Content-Range"] = f"bytes {start_byte}-{end_byte}/{filesize}"
+        status_code = 206  # Partial Content
+    else:
+        status_code = 200  # OK
 
     return StreamingResponse(
         content=preview_streamer(),
         media_type=content_type,
         headers=headers,
-        status_code=200
+        status_code=status_code
     )
