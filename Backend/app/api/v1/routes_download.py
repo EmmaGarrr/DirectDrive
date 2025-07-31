@@ -1,6 +1,6 @@
 # In file: Backend/app/api/v1/routes_download.py
 
-from fastapi import APIRouter, HTTPException, Request, Query
+from fastapi import APIRouter, HTTPException, Request, Query, Depends
 from fastapi.responses import StreamingResponse
 from urllib.parse import quote
 import httpx
@@ -8,9 +8,14 @@ import httpx
 from app.db.mongodb import db
 from app.core.config import settings
 from app.services.google_drive_service import gdrive_pool_manager, async_stream_gdrive_file
-from app.models.file import FileMetadataInDB, PreviewMetadataResponse
+from app.models.file import FileMetadataInDB, PreviewMetadataResponse, PreviewStreamRequest
+from app.services.preview_service import PreviewService
+from app.services.auth_service import get_current_user_optional
+from app.models.user import UserInDB
+from typing import Optional
 
 router = APIRouter()
+preview_service = PreviewService()
 
 @router.get(
     "/files/{file_id}/meta",
@@ -113,10 +118,10 @@ def get_preview_metadata(file_id: str):
     
     # Check if preview is available for this file type
     content_type = file_doc.get("content_type", "")
-    preview_available = is_previewable_content_type(content_type)
+    preview_available = preview_service.is_previewable_content_type(content_type)
     
     # Determine preview type
-    preview_type = get_preview_type(content_type)
+    preview_type = preview_service.get_preview_type(content_type)
     
     # Build streaming URLs
     base_url = getattr(settings, 'API_BASE_URL', 'http://localhost:8000')
@@ -145,21 +150,48 @@ def get_preview_metadata(file_id: str):
     summary="Stream File for Preview",
     tags=["Preview"]
 )
-async def stream_preview(file_id: str, request: Request, format: str = Query(None, description="Preview format: 'preview' or 'thumbnail'"), token: str = Query(None, description="JWT token for authentication")):
+async def stream_preview(
+    file_id: str, 
+    request: Request, 
+    format: str = Query(None, description="Preview format: 'preview' or 'thumbnail'"), 
+    token: str = Query(None, description="JWT token for authentication")
+):
     """
     Streams a file for preview with HTTP Range Request support.
     This endpoint is optimized for media streaming with partial content support.
     """
+    # Validate JWT token if provided
+    current_user = None
+    if token:
+        try:
+            from jose import JWTError, jwt
+            payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+            email: str = payload.get("sub")
+            if email:
+                user_doc = db.users.find_one({"email": email})
+                if user_doc:
+                    current_user = UserInDB(**user_doc)
+        except JWTError:
+            raise HTTPException(status_code=401, detail="Invalid authentication token")
+    
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
     file_doc = db.files.find_one({"_id": file_id})
     if not file_doc:
         raise HTTPException(status_code=404, detail="File not found")
+
+    # Check if user has access to this file
+    file_owner_id = file_doc.get("user_id")
+    if file_owner_id and str(file_owner_id) != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Access denied to this file")
 
     filename = file_doc.get("filename", "preview")
     filesize = file_doc.get("size_bytes", 0)
     content_type = file_doc.get("content_type", "application/octet-stream")
 
     # Check if preview is available for this content type
-    if not is_previewable_content_type(content_type):
+    if not preview_service.is_previewable_content_type(content_type):
         raise HTTPException(status_code=400, detail="File type not supported for preview")
 
     # Handle HTTP Range Request for partial content
@@ -249,44 +281,3 @@ async def stream_preview(file_id: str, request: Request, format: str = Query(Non
         headers=headers,
         status_code=status_code
     )
-
-# --- NEW: Helper function to determine if content type is previewable ---
-def is_previewable_content_type(content_type: str) -> bool:
-    """
-    Determines if a content type supports preview functionality.
-    """
-    previewable_types = [
-        # Video formats
-        "video/mp4", "video/webm", "video/avi", "video/mov", "video/quicktime",
-        # Audio formats  
-        "audio/mp3", "audio/wav", "audio/ogg", "audio/m4a", "audio/aac",
-        # Image formats
-        "image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml",
-        # Document formats
-        "application/pdf",
-        # Text formats
-        "text/plain", "application/json", "text/xml", "text/css", 
-        "text/javascript", "text/python", "text/html"
-    ]
-    
-    return content_type.lower() in previewable_types
-
-# --- NEW: Helper function to get preview type from content type ---
-def get_preview_type(content_type: str) -> str:
-    """
-    Returns the preview type for a given content type.
-    """
-    content_type_lower = content_type.lower()
-    
-    if content_type_lower.startswith("video/"):
-        return "video"
-    elif content_type_lower.startswith("audio/"):
-        return "audio"
-    elif content_type_lower.startswith("image/"):
-        return "image"
-    elif content_type_lower == "application/pdf":
-        return "document"
-    elif content_type_lower.startswith("text/") or content_type_lower == "application/json":
-        return "text"
-    else:
-        return "unknown"
