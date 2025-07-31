@@ -116,6 +116,7 @@ class PreviewMetadataResponse(BaseModel):
     content_type: str
     size_bytes: int
     preview_available: bool
+    preview_type: str
     media_info: Optional[MediaInfo] = None
     streaming_urls: StreamingUrls
 

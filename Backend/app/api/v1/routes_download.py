@@ -115,6 +115,9 @@ def get_preview_metadata(file_id: str):
     content_type = file_doc.get("content_type", "")
     preview_available = is_previewable_content_type(content_type)
     
+    # Determine preview type
+    preview_type = get_preview_type(content_type)
+    
     # Build streaming URLs
     base_url = getattr(settings, 'API_BASE_URL', 'http://localhost:8000')
     streaming_urls = {
@@ -131,6 +134,7 @@ def get_preview_metadata(file_id: str):
         content_type=content_type,
         size_bytes=file_doc.get("size_bytes", 0),
         preview_available=preview_available,
+        preview_type=preview_type,
         media_info=media_info,
         streaming_urls=streaming_urls
     )
@@ -268,3 +272,23 @@ def is_previewable_content_type(content_type: str) -> bool:
     ]
     
     return content_type.lower() in previewable_types
+
+# --- NEW: Helper function to get preview type from content type ---
+def get_preview_type(content_type: str) -> str:
+    """
+    Returns the preview type for a given content type.
+    """
+    content_type_lower = content_type.lower()
+    
+    if content_type_lower.startswith("video/"):
+        return "video"
+    elif content_type_lower.startswith("audio/"):
+        return "audio"
+    elif content_type_lower.startswith("image/"):
+        return "image"
+    elif content_type_lower == "application/pdf":
+        return "document"
+    elif content_type_lower.startswith("text/") or content_type_lower == "application/json":
+        return "text"
+    else:
+        return "unknown"
