@@ -153,38 +153,16 @@ def get_preview_metadata(file_id: str):
 async def stream_preview(
     file_id: str, 
     request: Request, 
-    format: str = Query(None, description="Preview format: 'preview' or 'thumbnail'"), 
-    token: str = Query(None, description="JWT token for authentication")
+    format: str = Query(None, description="Preview format: 'preview' or 'thumbnail'")
 ):
     """
     Streams a file for preview with HTTP Range Request support.
     This endpoint is optimized for media streaming with partial content support.
+    No authentication required - if user can access the download page, they can preview.
     """
-    # Validate JWT token if provided
-    current_user = None
-    if token:
-        try:
-            from jose import JWTError, jwt
-            payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-            email: str = payload.get("sub")
-            if email:
-                user_doc = db.users.find_one({"email": email})
-                if user_doc:
-                    current_user = UserInDB(**user_doc)
-        except JWTError:
-            raise HTTPException(status_code=401, detail="Invalid authentication token")
-    
-    if not current_user:
-        raise HTTPException(status_code=401, detail="Authentication required")
-
     file_doc = db.files.find_one({"_id": file_id})
     if not file_doc:
         raise HTTPException(status_code=404, detail="File not found")
-
-    # Check if user has access to this file
-    file_owner_id = file_doc.get("user_id")
-    if file_owner_id and str(file_owner_id) != str(current_user.id):
-        raise HTTPException(status_code=403, detail="Access denied to this file")
 
     filename = file_doc.get("filename", "preview")
     filesize = file_doc.get("size_bytes", 0)
