@@ -145,7 +145,7 @@ def get_preview_metadata(file_id: str):
     summary="Stream File for Preview",
     tags=["Preview"]
 )
-async def stream_preview(file_id: str, request: Request, format: str = Query(None, description="Preview format: 'preview' or 'thumbnail'")):
+async def stream_preview(file_id: str, request: Request, format: str = Query(None, description="Preview format: 'preview' or 'thumbnail'"), token: str = Query(None, description="JWT token for authentication")):
     """
     Streams a file for preview with HTTP Range Request support.
     This endpoint is optimized for media streaming with partial content support.
