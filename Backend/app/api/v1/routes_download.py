@@ -191,7 +191,7 @@ async def stream_preview(
     async def preview_streamer():
         # --- PRIMARY ATTEMPT: GOOGLE DRIVE ---
         try:
-            print(f"[PREVIEW] Streaming preview from Google Drive for '{filename}'...")
+            print(f"[PREVIEW] Streaming preview from Google Drive for '{filename}' (Range: {range_header or 'full file'})...")
             gdrive_id = file_doc.get("gdrive_id")
             account_id = file_doc.get("gdrive_account_id")
 
@@ -202,7 +202,8 @@ async def stream_preview(
             if not storage_account:
                 raise ValueError(f"Configuration for GDrive account '{account_id}' not found.")
 
-            # Stream with range support (if the service supports it)
+            # For now, stream the entire file since Google Drive range requests are complex
+            # The browser will handle buffering and seeking
             async for chunk in async_stream_gdrive_file(gdrive_id, account=storage_account):
                 yield chunk
             
@@ -214,7 +215,7 @@ async def stream_preview(
 
         # --- FALLBACK ATTEMPT: HETZNER ---
         try:
-            print(f"[PREVIEW] Streaming preview from Hetzner for '{filename}'...")
+            print(f"[PREVIEW] Streaming preview from Hetzner for '{filename}' (Range: {range_header or 'full file'})...")
             hetzner_path = file_doc.get("hetzner_remote_path")
             if not hetzner_path:
                 raise ValueError("Backup storage info (Hetzner) is missing from metadata.")
@@ -223,7 +224,7 @@ async def stream_preview(
             auth = (settings.HETZNER_USERNAME, settings.HETZNER_PASSWORD)
             timeout = httpx.Timeout(10.0, read=3600.0)
             
-            # Add range header for partial content
+            # Add range header for partial content with Hetzner
             headers = {}
             if range_header:
                 headers["Range"] = range_header
@@ -241,21 +242,16 @@ async def stream_preview(
             raise HTTPException(status_code=500, detail="Preview streaming failed")
     
     # Set appropriate headers for preview streaming
+    # For video streaming, we'll always return 200 OK and let the browser handle buffering
     headers = {
         "Accept-Ranges": "bytes",
-        "Content-Type": content_type
+        "Content-Type": content_type,
+        "Cache-Control": "no-cache"
     }
-    
-    # Add Content-Range header for partial content responses
-    if range_header:
-        headers["Content-Range"] = f"bytes {start_byte}-{end_byte}/{filesize}"
-        status_code = 206
-    else:
-        status_code = 200
 
     return StreamingResponse(
         content=preview_streamer(),
         media_type=content_type,
         headers=headers,
-        status_code=status_code
+        status_code=200
     )
