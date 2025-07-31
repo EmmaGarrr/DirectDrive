@@ -207,15 +207,26 @@ async def stream_preview(
                 # Use Google Drive API with range headers for seeking
                 import httpx
                 from google.auth.transport.requests import Request as GoogleRequest
+                from google.oauth2.credentials import Credentials
+                
+                # Create credentials from account config
+                creds = Credentials.from_authorized_user_info(
+                    info={
+                        "client_id": storage_account.client_id,
+                        "client_secret": storage_account.client_secret,
+                        "refresh_token": storage_account.refresh_token
+                    },
+                    scopes=['https://www.googleapis.com/auth/drive']
+                )
                 
                 # Refresh credentials if needed
-                if storage_account.creds.expired:
-                    storage_account.creds.refresh(GoogleRequest())
+                if creds.expired:
+                    creds.refresh(GoogleRequest())
                 
                 # Get direct download URL from Google Drive
                 download_url = f"https://www.googleapis.com/drive/v3/files/{gdrive_id}?alt=media"
                 headers = {
-                    "Authorization": f"Bearer {storage_account.creds.token}",
+                    "Authorization": f"Bearer {creds.token}",
                     "Range": range_header
                 }
                 
