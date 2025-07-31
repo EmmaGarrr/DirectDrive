@@ -231,9 +231,7 @@ async def stream_preview(file_id: str, request: Request, format: str = Query(Non
             raise HTTPException(status_code=500, detail="Preview streaming failed")
     
     # Set appropriate headers for preview streaming
-    content_length = end_byte - start_byte + 1
     headers = {
-        "Content-Length": str(content_length),
         "Accept-Ranges": "bytes",
         "Content-Type": content_type
     }
