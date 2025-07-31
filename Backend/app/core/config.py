@@ -23,6 +23,14 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int
     
+    # SMTP Configuration for password reset emails
+    SMTP_HOST: Optional[str] = None
+    SMTP_PORT: Optional[int] = None
+    SMTP_SECURE: bool = False
+    SMTP_USER: Optional[str] = None
+    SMTP_PASS: Optional[str] = None
+    FROM_EMAIL: Optional[str] = None
+    
     # Google Drive account credentials
     GDRIVE_ACCOUNT_1_CLIENT_ID: Optional[str] = None
     GDRIVE_ACCOUNT_1_CLIENT_SECRET: Optional[str] = None

@@ -9,6 +9,8 @@ from fastapi.security import OAuth2PasswordBearer
 from app.core.config import settings
 from app.db.mongodb import db
 from app.models.user import TokenData, UserInDB
+import secrets
+import string
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -33,6 +35,45 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
     return encoded_jwt
+
+def generate_reset_token() -> str:
+    """Generate a secure random token for password reset"""
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(32))
+
+def create_reset_token(email: str) -> str:
+    """Create a password reset token and store it in the database"""
+    reset_token = generate_reset_token()
+    expires_at = datetime.utcnow() + timedelta(hours=1)  # 1 hour expiration
+    
+    # Store reset token in database
+    db.password_reset_tokens.insert_one({
+        "email": email,
+        "reset_token": reset_token,
+        "expires_at": expires_at,
+        "used": False
+    })
+    
+    return reset_token
+
+def verify_reset_token(reset_token: str) -> Optional[str]:
+    """Verify a reset token and return the associated email if valid"""
+    token_doc = db.password_reset_tokens.find_one({
+        "reset_token": reset_token,
+        "used": False,
+        "expires_at": {"$gt": datetime.utcnow()}
+    })
+    
+    if token_doc:
+        return token_doc["email"]
+    return None
+
+def mark_reset_token_used(reset_token: str):
+    """Mark a reset token as used"""
+    db.password_reset_tokens.update_one(
+        {"reset_token": reset_token},
+        {"$set": {"used": True}}
+    )
 
 # This function remains for protected routes like /users/me
 async def get_current_user(token: str = Depends(oauth2_scheme)):

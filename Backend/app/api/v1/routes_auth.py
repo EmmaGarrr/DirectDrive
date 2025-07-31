@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
-from app.services.auth_service import create_access_token, verify_password, get_password_hash, get_current_user
-from app.models.user import UserCreate, UserInDB, Token, PasswordChange, UserProfile
+from app.services.auth_service import create_access_token, verify_password, get_password_hash, get_current_user, create_reset_token, verify_reset_token, mark_reset_token_used
+from app.services.email_service import email_service
+from app.models.user import UserCreate, UserInDB, Token, PasswordChange, UserProfile, ForgotPassword, ResetPassword
 from app.db.mongodb import db
 from datetime import timedelta
 
@@ -78,6 +79,62 @@ async def change_password(
     )
     
     return {"message": "Password changed successfully"}
+
+@router.post("/forgot-password")
+async def forgot_password(forgot_data: ForgotPassword):
+    # Check if user exists
+    user = db.users.find_one({"email": forgot_data.email})
+    if user:
+        # Generate reset token
+        reset_token = create_reset_token(forgot_data.email)
+        
+        # Send password reset email
+        reset_url = "http://localhost:4200/reset-password"  # Frontend reset page
+        email_sent = email_service.send_password_reset_email(
+            forgot_data.email, 
+            reset_token, 
+            reset_url
+        )
+        
+        if not email_sent:
+            # If email service is not configured, log the token for development
+            print(f"Password reset token for {forgot_data.email}: {reset_token}")
+            print(f"Reset URL: {reset_url}?token={reset_token}")
+    
+    # Always return success message (security - don't reveal if email exists)
+    return {"message": "If the email exists, a password reset link has been sent"}
+
+@router.post("/reset-password")
+async def reset_password(reset_data: ResetPassword):
+    # Verify reset token
+    email = verify_reset_token(reset_data.reset_token)
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token"
+        )
+    
+    # Check if user exists
+    user = db.users.find_one({"email": email})
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User not found"
+        )
+    
+    # Hash new password
+    new_hashed_password = get_password_hash(reset_data.new_password)
+    
+    # Update password in database
+    db.users.update_one(
+        {"_id": email},
+        {"$set": {"hashed_password": new_hashed_password}}
+    )
+    
+    # Mark reset token as used
+    mark_reset_token_used(reset_data.reset_token)
+    
+    return {"message": "Password reset successfully"}
 
 @router.post("/logout")
 async def logout(current_user: UserInDB = Depends(get_current_user)):

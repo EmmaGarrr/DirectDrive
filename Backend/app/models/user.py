@@ -28,6 +28,13 @@ class PasswordChange(BaseModel):
     current_password: str
     new_password: str
 
+class ForgotPassword(BaseModel):
+    email: EmailStr
+
+class ResetPassword(BaseModel):
+    reset_token: str
+    new_password: str
+
 class UserProfile(BaseModel):
     email: EmailStr
     storage_used_bytes: int
