@@ -8,6 +8,9 @@ from app.models.user import UserInDB, UserRole
 from app.db.mongodb import db
 from pydantic import BaseModel, EmailStr
 import re
+import httpx
+from app.services.google_drive_service import gdrive_pool_manager
+from app.core.config import settings
 
 router = APIRouter()
 
@@ -24,6 +27,23 @@ class UserDetailResponse(BaseModel):
     files_count: int
     storage_used: int
     last_activity: Optional[datetime]
+
+class UserFileResponse(BaseModel):
+    files: List[dict]
+    total: int
+    page: int
+    limit: int
+    total_pages: int
+    user_email: str
+
+class FileStorageInsights(BaseModel):
+    file_id: str
+    filename: str
+    status: str
+    storage_location: Optional[str]
+    google_drive: dict
+    hetzner_storage: dict
+    recommendations: List[str]
 
 class UserUpdateRequest(BaseModel):
     role: Optional[UserRole] = None
@@ -105,12 +125,28 @@ async def list_users(
     
     # Add computed fields
     for user in users:
-        # Get user file statistics
-        files_count = db.files.count_documents({"uploader_email": user["email"]}) if "files" in db.list_collection_names() else 0
+        # Get user file statistics using correct owner_id field
+        user_id = user["_id"]
+        if "files" in db.list_collection_names():
+            # Count files owned by this user
+            files_count = db.files.count_documents({"owner_id": user_id})
+            
+            # Calculate real storage usage from file sizes
+            storage_pipeline = [
+                {"$match": {"owner_id": user_id}},
+                {"$group": {
+                    "_id": None,
+                    "total_size": {"$sum": "$size_bytes"}
+                }}
+            ]
+            storage_result = list(db.files.aggregate(storage_pipeline))
+            storage_used = storage_result[0]["total_size"] if storage_result else 0
+        else:
+            files_count = 0
+            storage_used = 0
+            
         user["files_count"] = files_count
-        
-        # Calculate storage used (mock for now)
-        user["storage_used"] = files_count * 1024 * 1024  # Mock: 1MB per file
+        user["storage_used"] = storage_used
         
         # Add status
         user["status"] = "banned" if user.get("is_banned") else "suspended" if user.get("is_suspended") else "active"
@@ -147,9 +183,25 @@ async def get_user_detail(
             detail="User not found"
         )
     
-    # Get user statistics
-    files_count = db.files.count_documents({"uploader_email": user_email}) if "files" in db.list_collection_names() else 0
-    storage_used = files_count * 1024 * 1024  # Mock calculation
+    # Get user statistics using correct owner_id field
+    user_id = user["_id"]
+    if "files" in db.list_collection_names():
+        # Count files owned by this user
+        files_count = db.files.count_documents({"owner_id": user_id})
+        
+        # Calculate real storage usage from file sizes
+        storage_pipeline = [
+            {"$match": {"owner_id": user_id}},
+            {"$group": {
+                "_id": None,
+                "total_size": {"$sum": "$size_bytes"}
+            }}
+        ]
+        storage_result = list(db.files.aggregate(storage_pipeline))
+        storage_used = storage_result[0]["total_size"] if storage_result else 0
+    else:
+        files_count = 0
+        storage_used = 0
     
     # Get last activity (mock for now)
     last_activity = user.get("last_login")
@@ -173,6 +225,300 @@ async def get_user_detail(
         files_count=files_count,
         storage_used=storage_used,
         last_activity=last_activity
+    )
+
+@router.get("/users/{user_email}/files", response_model=UserFileResponse)
+async def get_user_files(
+    user_email: str,
+    request: Request,
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    sort_by: Optional[str] = Query("upload_date"),
+    sort_order: Optional[str] = Query("desc"),
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Get files uploaded by a specific user"""
+    
+    # Find user
+    user = db.users.find_one({"email": user_email}, {"_id": 1, "email": 1})
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    user_id = user["_id"]
+    
+    # Check if files collection exists
+    if "files" not in db.list_collection_names():
+        return UserFileResponse(
+            files=[],
+            total=0,
+            page=page,
+            limit=limit,
+            total_pages=0,
+            user_email=user_email
+        )
+    
+    # Build query for user's files
+    query = {"owner_id": user_id}
+    
+    # Get total count
+    total = db.files.count_documents(query)
+    
+    # Calculate pagination
+    skip = (page - 1) * limit
+    total_pages = (total + limit - 1) // limit
+    
+    # Build sort
+    sort_direction = 1 if sort_order == "asc" else -1
+    sort_field = sort_by if sort_by in ["filename", "size_bytes", "upload_date", "status"] else "upload_date"
+    
+    # Get files
+    files_cursor = db.files.find(query, {"hashed_password": 0}).sort(sort_field, sort_direction).skip(skip).limit(limit)
+    files = list(files_cursor)
+    
+    # Enrich files with additional data
+    for file_doc in files:
+        # Add file type based on MIME type
+        content_type = file_doc.get("content_type", "")
+        if content_type.startswith("image/"):
+            file_doc["file_type"] = "image"
+        elif content_type.startswith("video/"):
+            file_doc["file_type"] = "video"
+        elif content_type.startswith("audio/"):
+            file_doc["file_type"] = "audio"
+        elif any(x in content_type for x in ["pdf", "document", "text"]):
+            file_doc["file_type"] = "document"
+        elif any(x in content_type for x in ["zip", "rar", "7z", "tar", "gzip"]):
+            file_doc["file_type"] = "archive"
+        else:
+            file_doc["file_type"] = "other"
+        
+        # Format size for display
+        size_bytes = file_doc.get("size_bytes", 0)
+        if size_bytes == 0:
+            file_doc["size_formatted"] = "0 B"
+        elif size_bytes < 1024:
+            file_doc["size_formatted"] = f"{size_bytes} B"
+        elif size_bytes < 1024*1024:
+            file_doc["size_formatted"] = f"{size_bytes/1024:.1f} KB"
+        elif size_bytes < 1024*1024*1024:
+            file_doc["size_formatted"] = f"{size_bytes/(1024*1024):.1f} MB"
+        else:
+            file_doc["size_formatted"] = f"{size_bytes/(1024*1024*1024):.1f} GB"
+        
+        # Format upload date
+        upload_date = file_doc.get("upload_date")
+        if upload_date:
+            file_doc["upload_date_formatted"] = upload_date.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            file_doc["upload_date_formatted"] = "Unknown"
+    
+    # Log admin activity
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action="view_user_files",
+        details=f"Viewed files for user: {user_email} (page {page})",
+        ip_address=get_client_ip(request),
+        endpoint=f"/api/v1/admin/users/{user_email}/files"
+    )
+    
+    return UserFileResponse(
+        files=files,
+        total=total,
+        page=page,
+        limit=limit,
+        total_pages=total_pages,
+        user_email=user_email
+    )
+
+@router.get("/files/{file_id}/storage-insights", response_model=FileStorageInsights)
+async def get_file_storage_insights(
+    file_id: str,
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Get detailed storage insights for a specific file"""
+    
+    # Find the file
+    file_doc = db.files.find_one({"_id": file_id})
+    if not file_doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+    
+    filename = file_doc.get("filename", "Unknown")
+    file_status = file_doc.get("status", "unknown")
+    storage_location = file_doc.get("storage_location")
+    
+    google_drive_insights = {"exists": False, "accessible": False, "details": "Not checked"}
+    hetzner_insights = {"exists": False, "accessible": False, "details": "Not checked"}
+    recommendations = []
+    
+    # Check Google Drive storage
+    gdrive_id = file_doc.get("gdrive_id")
+    account_id = file_doc.get("gdrive_account_id")
+    
+    if gdrive_id and account_id:
+        try:
+            # Get the Google Drive account
+            storage_account = gdrive_pool_manager.get_account_by_id(account_id)
+            if storage_account:
+                # Check if file exists in Google Drive
+                from googleapiclient.discovery import build
+                from google.auth.transport.requests import Request as GoogleRequest
+                from google.oauth2.credentials import Credentials
+                
+                # Create credentials
+                creds = Credentials(
+                    token=None,
+                    refresh_token=storage_account.refresh_token,
+                    client_id=storage_account.client_id,
+                    client_secret=storage_account.client_secret,
+                    token_uri="https://oauth2.googleapis.com/token"
+                )
+                
+                # Refresh token if needed
+                if not creds.valid:
+                    creds.refresh(GoogleRequest())
+                
+                # Build service and check file
+                service = build('drive', 'v3', credentials=creds)
+                try:
+                    file_metadata = service.files().get(fileId=gdrive_id, fields="id,name,size,trashed").execute()
+                    
+                    if file_metadata.get("trashed"):
+                        google_drive_insights = {
+                            "exists": True,
+                            "accessible": False,
+                            "details": f"File exists in Google Drive but is in trash",
+                            "account_id": account_id,
+                            "file_size": file_metadata.get("size", "Unknown")
+                        }
+                        recommendations.append("File is in Google Drive trash - can be restored")
+                    else:
+                        google_drive_insights = {
+                            "exists": True,
+                            "accessible": True,
+                            "details": f"File exists and is accessible in Google Drive",
+                            "account_id": account_id,
+                            "file_size": file_metadata.get("size", "Unknown")
+                        }
+                        if file_status != "completed":
+                            recommendations.append("File exists in Google Drive - update status to completed")
+                
+                except Exception as gdrive_error:
+                    google_drive_insights = {
+                        "exists": False,
+                        "accessible": False,
+                        "details": f"Google Drive API error: {str(gdrive_error)}",
+                        "account_id": account_id
+                    }
+                    recommendations.append("Google Drive file not accessible - may need re-upload")
+            else:
+                google_drive_insights = {
+                    "exists": False,
+                    "accessible": False,
+                    "details": f"Google Drive account '{account_id}' not found in configuration",
+                    "account_id": account_id
+                }
+                recommendations.append("Google Drive account configuration missing")
+        
+        except Exception as e:
+            google_drive_insights = {
+                "exists": False,
+                "accessible": False,
+                "details": f"Error checking Google Drive: {str(e)}",
+                "account_id": account_id
+            }
+    else:
+        google_drive_insights = {
+            "exists": False,
+            "accessible": False,
+            "details": "No Google Drive ID or account ID in file metadata"
+        }
+        if file_status in ["failed", "uploading"]:
+            recommendations.append("Missing Google Drive metadata - file upload may have failed")
+    
+    # Check Hetzner storage
+    hetzner_path = file_doc.get("hetzner_remote_path")
+    if hetzner_path and settings.HETZNER_WEBDAV_URL:
+        try:
+            hetzner_url = f"{settings.HETZNER_WEBDAV_URL}/{hetzner_path}"
+            auth = (settings.HETZNER_USERNAME, settings.HETZNER_PASSWORD)
+            
+            async with httpx.AsyncClient(auth=auth, timeout=10.0) as client:
+                # Use HEAD request to check existence without downloading
+                response = await client.head(hetzner_url)
+                
+                if response.status_code == 200:
+                    content_length = response.headers.get("content-length", "Unknown")
+                    hetzner_insights = {
+                        "exists": True,
+                        "accessible": True,
+                        "details": f"File exists in Hetzner storage",
+                        "file_size": content_length,
+                        "path": hetzner_path
+                    }
+                    recommendations.append("File available in Hetzner backup storage")
+                elif response.status_code == 404:
+                    hetzner_insights = {
+                        "exists": False,
+                        "accessible": False,
+                        "details": "File not found in Hetzner storage",
+                        "path": hetzner_path
+                    }
+                else:
+                    hetzner_insights = {
+                        "exists": False,
+                        "accessible": False,
+                        "details": f"Hetzner storage returned status {response.status_code}",
+                        "path": hetzner_path
+                    }
+        
+        except Exception as hetzner_error:
+            hetzner_insights = {
+                "exists": False,
+                "accessible": False,
+                "details": f"Error checking Hetzner storage: {str(hetzner_error)}",
+                "path": hetzner_path
+            }
+    else:
+        hetzner_insights = {
+            "exists": False,
+            "accessible": False,
+            "details": "No Hetzner backup path in file metadata or Hetzner not configured"
+        }
+    
+    # Add general recommendations based on status
+    if file_status == "failed":
+        if not google_drive_insights["exists"] and not hetzner_insights["exists"]:
+            recommendations.append("File failed to upload and no copies found in storage")
+        recommendations.append("Consider cleaning up failed upload record")
+    elif file_status == "uploading":
+        recommendations.append("File appears to be stuck in uploading state")
+        if google_drive_insights["exists"]:
+            recommendations.append("File found in Google Drive - update status to completed")
+    
+    # Log admin activity
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action="check_file_storage_insights",
+        details=f"Checked storage insights for file: {filename} (ID: {file_id})",
+        ip_address=get_client_ip(request),
+        endpoint=f"/api/v1/admin/files/{file_id}/storage-insights"
+    )
+    
+    return FileStorageInsights(
+        file_id=file_id,
+        filename=filename,
+        status=file_status,
+        storage_location=storage_location,
+        google_drive=google_drive_insights,
+        hetzner_storage=hetzner_insights,
+        recommendations=recommendations
     )
 
 @router.put("/users/{user_email}")
@@ -718,17 +1064,15 @@ async def get_storage_usage_analytics(
                 {
                     "$lookup": {
                         "from": "files",
-                        "localField": "email",
-                        "foreignField": "uploader_email",
+                        "localField": "_id",
+                        "foreignField": "owner_id",
                         "as": "user_files"
                     }
                 },
                 {
                     "$addFields": {
                         "files_count": {"$size": "$user_files"},
-                        "storage_used": {
-                            "$multiply": [{"$size": "$user_files"}, 1024 * 1024]  # Mock: 1MB per file
-                        }
+                        "storage_used": {"$sum": "$user_files.size_bytes"}  # Real storage from file sizes
                     }
                 },
                 {
