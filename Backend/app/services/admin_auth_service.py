@@ -44,10 +44,28 @@ async def authenticate_admin(email: str, password: str) -> Optional[AdminUserInD
     if user_role not in ["admin", "superadmin"]:
         return None
     
-    # Update last login
+    # Update last login and ensure all required fields exist
+    update_fields = {"last_login": datetime.utcnow()}
+    
+    # Ensure backward compatibility by setting default values for missing fields
+    if "role" not in user or user["role"] is None:
+        # If no role is set but user was in admin collection, assume admin
+        update_fields["role"] = "admin"
+        user["role"] = "admin"
+        
+    if "is_admin" not in user or user["is_admin"] is None:
+        update_fields["is_admin"] = True
+        user["is_admin"] = True
+        
+    if "storage_limit_bytes" not in user:
+        # Set higher limit for admin users
+        admin_storage_limit = 107374182400  # 100GB for admin users
+        update_fields["storage_limit_bytes"] = admin_storage_limit
+        user["storage_limit_bytes"] = admin_storage_limit
+    
     db.users.update_one(
         {"email": email},
-        {"$set": {"last_login": datetime.utcnow()}}
+        {"$set": update_fields}
     )
     
     return AdminUserInDB(**user)
@@ -79,6 +97,13 @@ async def get_current_admin(token: str = Depends(admin_oauth2_scheme)) -> AdminU
     user_role = user.get("role", "regular")
     if user_role not in ["admin", "superadmin"]:
         raise credentials_exception
+    
+    # Ensure backward compatibility for missing fields (don't update DB here to avoid performance issues)
+    if "is_admin" not in user or user["is_admin"] is None:
+        user["is_admin"] = True
+        
+    if "storage_limit_bytes" not in user:
+        user["storage_limit_bytes"] = 107374182400  # 100GB for admin users
     
     return AdminUserInDB(**user)
 

@@ -20,11 +20,52 @@ BACKUP_TASK_SEMAPHORE = asyncio.Semaphore(1)
 # --- The rest of the main.py file is largely the same ---
 class ConnectionManager:
     # ...
-    def __init__(self): self.active_connections: List[WebSocket] = []
-    async def connect(self, websocket: WebSocket): await websocket.accept(); self.active_connections.append(websocket)
-    def disconnect(self, websocket: WebSocket): self.active_connections.remove(websocket)
+    def __init__(self): 
+        self.active_connections: List[WebSocket] = []
+        # Start background task for periodic updates
+        asyncio.create_task(self.periodic_updates())
+        
+    async def connect(self, websocket: WebSocket): 
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        
+    def disconnect(self, websocket: WebSocket): 
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+            
     async def broadcast(self, data: dict):
-        for connection in self.active_connections: await connection.send_json(data)
+        disconnected = []
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(data)
+            except Exception as e:
+                print(f"[WebSocket] Failed to send to connection: {e}")
+                disconnected.append(connection)
+        
+        # Remove disconnected connections
+        for conn in disconnected:
+            self.disconnect(conn)
+    
+    async def periodic_updates(self):
+        """Send periodic system updates to connected admin clients"""
+        while True:
+            try:
+                await asyncio.sleep(30)  # Send update every 30 seconds
+                if self.active_connections:
+                    import time
+                    from app.db.mongodb import db
+                    
+                    # Get basic system stats
+                    total_files = db.files.count_documents({})
+                    total_users = db.users.count_documents({})
+                    
+                    await self.broadcast({
+                        "type": "system_update",
+                        "message": f"[System] {time.strftime('%H:%M:%S')} - Files: {total_files}, Users: {total_users}, Connections: {len(self.active_connections)}"
+                    })
+            except Exception as e:
+                print(f"[WebSocket] Periodic update error: {e}")
+                await asyncio.sleep(60)  # Wait longer on error
 
 manager = ConnectionManager()
 app = FastAPI(title="File Transfer Service")
@@ -33,13 +74,83 @@ app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True
 
 @app.websocket("/ws_admin")
 async def websocket_admin_endpoint(websocket: WebSocket, token: str = ""):
-    # ... admin websocket logic ...
-    if token != settings.ADMIN_WEBSOCKET_TOKEN:
-        await websocket.close(code=1008, reason="Invalid admin token"); return
-    await manager.connect(websocket)
+    """Admin WebSocket endpoint with JWT authentication"""
+    from app.services.admin_auth_service import get_current_admin
+    from app.models.admin import AdminUserInDB
+    from jose import JWTError, jwt
+    
+    # Validate JWT token
     try:
-        while True: await websocket.receive_text()
+        if not token:
+            await websocket.close(code=1008, reason="No token provided")
+            return
+            
+        # Decode and validate JWT token
+        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+        email: str = payload.get("sub")
+        is_admin: bool = payload.get("is_admin", False)
+        
+        if email is None or not is_admin:
+            await websocket.close(code=1008, reason="Invalid admin token")
+            return
+            
+        # Verify admin user exists in database
+        from app.db.mongodb import db
+        user = db.users.find_one({"email": email})
+        if not user or user.get("role") not in ["admin", "superadmin"]:
+            await websocket.close(code=1008, reason="Admin user not found or insufficient permissions")
+            return
+            
+        # Create admin object for logging
+        admin = AdminUserInDB(**user)
+        
+    except JWTError as e:
+        await websocket.close(code=1008, reason="Invalid JWT token")
+        return
+    except Exception as e:
+        await websocket.close(code=1008, reason="Authentication failed")
+        return
+    
+    # Connection successful
+    await manager.connect(websocket)
+    print(f"[WebSocket] Admin connected: {admin.email} (Role: {admin.role})")
+    
+    try:
+        # Send welcome message
+        await websocket.send_json({
+            "type": "system",
+            "message": f"[WebSocket] Connected as {admin.role}: {admin.email}"
+        })
+        
+        # Send initial system status
+        import time
+        await websocket.send_json({
+            "type": "status",
+            "message": f"[System] Admin panel connected at {time.strftime('%Y-%m-%d %H:%M:%S')}"
+        })
+        
+        # Keep connection alive and handle messages
+        while True:
+            try:
+                message = await websocket.receive_text()
+                # Echo received messages and broadcast to demonstrate real-time capability
+                response_msg = f"[{admin.role.upper()}] {admin.email}: {message}"
+                
+                # Broadcast to all connected admin clients
+                await manager.broadcast({
+                    "type": "admin_message",
+                    "message": response_msg
+                })
+                
+            except Exception as e:
+                print(f"[WebSocket] Message handling error: {e}")
+                break
+                
     except WebSocketDisconnect:
+        print(f"[WebSocket] Admin disconnected: {admin.email}")
+    except Exception as e:
+        print(f"[WebSocket] Connection error: {e}")
+    finally:
         manager.disconnect(websocket)
 
 async def run_controlled_backup(file_id: str):

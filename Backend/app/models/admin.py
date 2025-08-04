@@ -14,6 +14,7 @@ class AdminUserInDB(BaseModel):
     email: EmailStr
     role: UserRole
     is_admin: bool = True
+    storage_limit_bytes: Optional[int] = None
     created_at: Optional[datetime] = None
     last_login: Optional[datetime] = None
     

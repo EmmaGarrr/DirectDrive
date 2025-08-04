@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from app.services.auth_service import create_access_token, verify_password, get_password_hash, get_current_user
-from app.models.user import UserCreate, UserInDB, Token
+from app.models.user import UserCreate, UserInDB, Token, UserProfileResponse
+from app.services.storage_service import StorageService
 from app.db.mongodb import db
 from datetime import timedelta
 
@@ -42,6 +43,18 @@ async def register_user(user: UserCreate):
     
     return UserInDB(**user_dict)
 
-@router.get("/users/me", response_model=UserInDB)
+@router.get("/users/me", response_model=UserProfileResponse)
 async def read_users_me(current_user: UserInDB = Depends(get_current_user)):
-    return current_user
+    # Get full user document from database
+    user_doc = db.users.find_one({"_id": current_user.id}, {"hashed_password": 0})
+    if not user_doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    # Calculate storage data
+    storage_data = StorageService.calculate_user_storage(current_user.id)
+    
+    # Build enhanced profile response
+    return StorageService.build_user_profile_response(user_doc, storage_data)
