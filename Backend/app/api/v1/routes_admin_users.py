@@ -123,8 +123,12 @@ async def list_users(
     
     users = list(users_cursor)
     
-    # Add computed fields
+    # Add computed fields and convert ObjectId to string
     for user in users:
+        # Convert ObjectId to string for serialization
+        if "_id" in user and hasattr(user["_id"], "__str__"):
+            user["_id"] = str(user["_id"])
+        
         # Get user file statistics using correct owner_id field
         user_id = user["_id"]
         if "files" in db.list_collection_names():
@@ -182,6 +186,10 @@ async def get_user_detail(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
+    
+    # Convert ObjectId to string for serialization
+    if "_id" in user and hasattr(user["_id"], "__str__"):
+        user["_id"] = str(user["_id"])
     
     # Get user statistics using correct owner_id field
     user_id = user["_id"]
@@ -278,8 +286,11 @@ async def get_user_files(
     files_cursor = db.files.find(query, {"hashed_password": 0}).sort(sort_field, sort_direction).skip(skip).limit(limit)
     files = list(files_cursor)
     
-    # Enrich files with additional data
+    # Enrich files with additional data and convert ObjectId to string
     for file_doc in files:
+        # Convert ObjectId to string for serialization
+        if "_id" in file_doc and hasattr(file_doc["_id"], "__str__"):
+            file_doc["_id"] = str(file_doc["_id"])
         # Add file type based on MIME type
         content_type = file_doc.get("content_type", "")
         if content_type.startswith("image/"):
@@ -804,6 +815,11 @@ async def export_users(
     
     users = list(db.users.find({}, {"hashed_password": 0}))
     
+    # Convert ObjectId to string for serialization
+    for user in users:
+        if "_id" in user and hasattr(user["_id"], "__str__"):
+            user["_id"] = str(user["_id"])
+    
     # Log admin activity
     await log_admin_activity(
         admin_email=current_admin.email,
@@ -1086,11 +1102,20 @@ async def get_storage_usage_analytics(
             ]
             
             users_with_storage = list(db.users.aggregate(pipeline))
+            
+            # Convert ObjectId to string for serialization
+            for user in users_with_storage:
+                if "_id" in user and hasattr(user["_id"], "__str__"):
+                    user["_id"] = str(user["_id"])
         else:
             # Mock data when files collection doesn't exist
             users = list(db.users.find({}, {"email": 1, "hashed_password": 0}))
             users_with_storage = []
             for user in users:
+                # Convert ObjectId to string for serialization
+                if "_id" in user and hasattr(user["_id"], "__str__"):
+                    user["_id"] = str(user["_id"])
+                
                 # Mock file count and storage
                 mock_files = abs(hash(user["email"])) % 50  # 0-49 files per user
                 users_with_storage.append({
@@ -1196,8 +1221,13 @@ async def get_user_activity_patterns(
     # Get most active users
     most_active_users = list(db.users.find(
         {"last_login": {"$exists": True}},
-        {"email": 1, "last_login": 1, "_id": 0}
+        {"email": 1, "last_login": 1, "_id": 1}
     ).sort("last_login", -1).limit(10))
+    
+    # Convert ObjectId to string for serialization
+    for user in most_active_users:
+        if "_id" in user and hasattr(user["_id"], "__str__"):
+            user["_id"] = str(user["_id"])
     
     # Log admin activity
     await log_admin_activity(
