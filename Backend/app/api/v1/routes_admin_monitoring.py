@@ -42,10 +42,10 @@ async def get_system_health(
         boot_time = psutil.boot_time()
         uptime = time.time() - boot_time
         
-        # Database Stats
+        # Database Stats (excluding deleted files)
         db_stats = {
             "total_collections": len(db.list_collection_names()),
-            "total_files": db.files.count_documents({}),
+            "total_files": db.files.count_documents({"deleted_at": {"$exists": False}}),  # Exclude deleted files
             "total_users": db.users.count_documents({}),
             "total_admins": db.users.count_documents({"role": {"$in": ["admin", "superadmin"]}}),
             "active_sessions": 0  # TODO: Implement session tracking

@@ -125,7 +125,8 @@ async def list_files(
     if file_status and file_status in ["pending", "uploading", "completed", "failed"]:
         query["status"] = file_status
     
-    # Get total count
+    # Get total count (excluding deleted files)
+    query["deleted_at"] = {"$exists": False}  # Exclude deleted files
     total = db.files.count_documents(query)
     
     # Calculate pagination
@@ -170,7 +171,7 @@ async def list_files(
         # Add download URL
         file_doc["download_url"] = f"/api/v1/download/stream/{file_doc['_id']}"
     
-    # Calculate storage statistics
+    # Calculate storage statistics (excluding deleted files)
     total_storage = db.files.aggregate([
         {"$match": query},
         {"$group": {"_id": None, "total_size": {"$sum": "$size_bytes"}}}
