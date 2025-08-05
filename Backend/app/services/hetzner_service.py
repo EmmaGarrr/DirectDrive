@@ -952,6 +952,8 @@ import asyncio
 import httpx
 import uuid
 import traceback
+from datetime import datetime
+from typing import Optional, Dict, Any, Tuple
 
 from app.core.config import settings
 from app.db.mongodb import db
@@ -980,9 +982,242 @@ async def consumer(queue: asyncio.Queue):
         yield chunk
         queue.task_done()
 
-async def transfer_gdrive_to_hetzner(file_id: str):
+def _get_hetzner_auth() -> tuple[str, str]:
+    """
+    Returns the Hetzner authentication tuple (username, password).
+    
+    Raises:
+        ValueError: If Hetzner credentials are not configured
+    """
     if not all([settings.HETZNER_WEBDAV_URL, settings.HETZNER_USERNAME, settings.HETZNER_PASSWORD]):
-        print("!!! [HETZNER_BACKUP] CRITICAL ERROR: Hetzner credentials are not configured in the .env file.")
+        raise ValueError("Hetzner credentials are not properly configured in the .env file.")
+    return (settings.HETZNER_USERNAME, settings.HETZNER_PASSWORD)
+
+
+def _get_hetzner_base_url() -> str:
+    """
+    Returns the base URL for Hetzner WebDAV.
+    
+    Raises:
+        ValueError: If Hetzner URL is not configured
+    """
+    if not settings.HETZNER_WEBDAV_URL:
+        raise ValueError("Hetzner WebDAV URL is not configured in the .env file.")
+    return settings.HETZNER_WEBDAV_URL.rstrip('/')
+
+
+async def get_file_info(remote_path: str) -> dict:
+    """
+    Retrieves file information from Hetzner Storage Box.
+    
+    Args:
+        remote_path: The path to the file in Hetzner storage (relative to the base URL)
+        
+    Returns:
+        dict: File information including size, last_modified, exists, etc.
+        
+    Raises:
+        httpx.HTTPStatusError: If there's an HTTP error
+        Exception: For other unexpected errors
+    """
+    try:
+        auth = _get_hetzner_auth()
+        base_url = _get_hetzner_base_url()
+        url = f"{base_url}/{remote_path.lstrip('/')}"
+        
+        async with httpx.AsyncClient(auth=auth) as client:
+            # Use PROPFIND to get file metadata
+            headers = {
+                'Depth': '0',
+                'Content-Type': 'application/xml'
+            }
+            body = """
+            <?xml version="1.0" encoding="utf-8" ?>
+            <d:propfind xmlns:d="DAV:">
+                <d:prop>
+                    <d:getcontentlength/>
+                    <d:getlastmodified/>
+                    <d:resourcetype/>
+                    <d:getetag/>
+                </d:prop>
+            </d:propfind>
+            """
+            
+            response = await client.request(
+                'PROPFIND',
+                url,
+                headers=headers,
+                content=body.strip()
+            )
+            
+            if response.status_code == 404:
+                return {
+                    'exists': False,
+                    'path': remote_path
+                }
+                
+            response.raise_for_status()
+            
+            # Parse the XML response (simplified parsing)
+            from xml.etree import ElementTree as ET
+            root = ET.fromstring(response.text)
+            
+            # Extract file info from XML
+            ns = {'d': 'DAV:'}
+            content_length = root.find('.//d:getcontentlength', ns)
+            last_modified = root.find('.//d:getlastmodified', ns)
+            resource_type = root.find('.//d:resourcetype', ns)
+            
+            is_directory = len(resource_type.findall('d:collection', ns)) > 0
+            
+            return {
+                'exists': True,
+                'path': remote_path,
+                'size': int(content_length.text) if content_length is not None and content_length.text else 0,
+                'last_modified': last_modified.text if last_modified is not None else None,
+                'is_directory': is_directory,
+                'url': url
+            }
+            
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {'exists': False, 'path': remote_path}
+        print(f"!!! [HETZNER] Error getting file info for {remote_path}: {e}")
+        raise
+    except Exception as e:
+        print(f"!!! [HETZNER] Unexpected error getting file info for {remote_path}: {e}")
+        raise
+
+
+async def delete_file(remote_path: str) -> bool:
+    """
+    Deletes a file or directory from Hetzner Storage Box.
+    
+    Args:
+        remote_path: The path to the file or directory in Hetzner storage
+        
+    Returns:
+        bool: True if deletion was successful, False if the file didn't exist
+        
+    Raises:
+        httpx.HTTPStatusError: If there's an HTTP error during deletion
+        Exception: For other unexpected errors
+    """
+    try:
+        auth = _get_hetzner_auth()
+        base_url = _get_hetzner_base_url()
+        url = f"{base_url}/{remote_path.lstrip('/')}"
+        
+        # First check if the file exists
+        file_info = await get_file_info(remote_path)
+        if not file_info['exists']:
+            return False
+            
+        # If it's a directory, we need to delete its contents first (recursively)
+        if file_info.get('is_directory'):
+            await _delete_directory_contents(remote_path)
+        
+        # Delete the file or empty directory
+        async with httpx.AsyncClient(auth=auth) as client:
+            response = await client.delete(url)
+            response.raise_for_status()
+            
+        print(f"[HETZNER] Successfully deleted {remote_path}")
+        return True
+        
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return False  # Already deleted or doesn't exist
+        print(f"!!! [HETZNER] Error deleting {remote_path}: {e}")
+        raise
+    except Exception as e:
+        print(f"!!! [HETZNER] Unexpected error deleting {remote_path}: {e}")
+        raise
+
+
+async def _delete_directory_contents(directory_path: str) -> None:
+    """
+    Recursively deletes all contents of a directory in Hetzner Storage Box.
+    
+    Args:
+        directory_path: The path to the directory in Hetzner storage
+        
+    Raises:
+        Exception: If there's an error during deletion
+    """
+    try:
+        auth = _get_hetzner_auth()
+        base_url = _get_hetzner_base_url()
+        url = f"{base_url}/{directory_path.lstrip('/')}"
+        
+        # First list all contents of the directory
+        headers = {
+            'Depth': '1',
+            'Content-Type': 'application/xml'
+        }
+        body = """
+        <?xml version="1.0" encoding="utf-8" ?>
+        <d:propfind xmlns:d="DAV:">
+            <d:prop>
+                <d:displayname/>
+                <d:resourcetype/>
+            </d:prop>
+        </d:propfind>
+        """
+        
+        async with httpx.AsyncClient(auth=auth) as client:
+            # Get directory contents
+            response = await client.request(
+                'PROPFIND',
+                url,
+                headers=headers,
+                content=body.strip()
+            )
+            response.raise_for_status()
+            
+            # Parse the XML response
+            from xml.etree import ElementTree as ET
+            root = ET.fromstring(response.text)
+            
+            # Process each item in the directory
+            ns = {'d': 'DAV:'}
+            for response in root.findall('.//d:response', ns):
+                href = response.find('d:href', ns)
+                if href is None:
+                    continue
+                    
+                # Get the relative path from the href
+                item_path = href.text.strip()
+                if item_path.endswith('/'):
+                    item_path = item_path[:-1]  # Remove trailing slash
+                
+                # Skip the directory itself
+                if not item_path or item_path.endswith(directory_path.split('/')[-1]):
+                    continue
+                    
+                # Delete the item (recursively for directories)
+                item_remote_path = f"{directory_path.rstrip('/')}/{item_path.split('/')[-1]}"
+                await delete_file(item_remote_path)
+                
+    except Exception as e:
+        print(f"!!! [HETZNER] Error deleting directory contents for {directory_path}: {e}")
+        raise
+
+
+async def transfer_gdrive_to_hetzner(file_id: str):
+    """
+    Transfers a file from Google Drive to Hetzner Storage Box.
+    
+    This is a background task that handles the transfer asynchronously.
+    Updates the database with the transfer status.
+    
+    Args:
+        file_id: The ID of the file in the database
+    """
+    try:
+        _get_hetzner_auth()  # Will raise if not configured
+    except ValueError as e:
+        print(f"!!! [HETZNER_BACKUP] CRITICAL ERROR: {e}")
         db.files.update_one({"_id": file_id}, {"$set": {"backup_status": BackupStatus.FAILED}})
         return
 
@@ -1002,7 +1237,8 @@ async def transfer_gdrive_to_hetzner(file_id: str):
         file_size = file_doc.get("size_bytes", 0)
 
         # Create the directory on Hetzner - this is always required.
-        directory_url = f"{settings.HETZNER_WEBDAV_URL}/{file_id}"
+        base_url = _get_hetzner_base_url()
+        directory_url = f"{base_url}/{file_id}"
         async with httpx.AsyncClient(auth=auth) as client:
             mkcol_response = await client.request("MKCOL", directory_url)
             if mkcol_response.status_code not in [201, 405]:
@@ -1029,7 +1265,7 @@ async def transfer_gdrive_to_hetzner(file_id: str):
             headers = {'Content-Length': str(file_size)}
             timeout_config = httpx.Timeout(30.0, read=1800.0, write=1800.0)
             
-            file_upload_url = f"{settings.HETZNER_WEBDAV_URL}/{remote_path}"
+            file_upload_url = f"{_get_hetzner_base_url()}/{remote_path}"
             async with httpx.AsyncClient(auth=auth, timeout=timeout_config) as client:
                 print(f"[HETZNER_BACKUP] Starting upload to Hetzner from consumer...")
                 response = await client.put(file_upload_url, content=consumer(queue), headers=headers)

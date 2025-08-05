@@ -1415,4 +1415,150 @@ async def async_stream_gdrive_file(gdrive_id: str, account: GoogleAccountConfig)
     except HttpError as e:
         print(f"!!! [{account.id}] Google API error during stream: {e.content}"); raise e
     except Exception as e:
-        print(f"!!! [{account.id}] Unexpected error during Google Drive stream: {e}"); raise e
+        print(f"!!! [{account.id}] Unexpected error during stream: {str(e)}"); raise e
+
+
+async def get_file_info(gdrive_id: str, account: GoogleAccountConfig) -> Dict[str, Any]:
+    """
+    Retrieves file metadata from Google Drive.
+    
+    Args:
+        gdrive_id: The ID of the file in Google Drive
+        account: The Google account configuration to use
+        
+    Returns:
+        Dict containing file metadata or None if not found
+        
+    Raises:
+        HttpError: If there's an API error
+        Exception: For other unexpected errors
+    """
+    try:
+        gdrive_pool_manager.tracker.increment_request_count(account.id)
+        service = _get_gdrive_service(account)
+        
+        # Get file metadata
+        file_metadata = await asyncio.to_thread(
+            service.files().get(
+                fileId=gdrive_id,
+                fields='id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,trashed,shared,webViewLink,webContentLink,thumbnailLink'
+            ).execute
+        )
+        
+        return {
+            'id': file_metadata.get('id'),
+            'name': file_metadata.get('name'),
+            'mime_type': file_metadata.get('mimeType'),
+            'size': int(file_metadata.get('size', 0)),
+            'created_time': file_metadata.get('createdTime'),
+            'modified_time': file_metadata.get('modifiedTime'),
+            'md5_checksum': file_metadata.get('md5Checksum'),
+            'is_trashed': file_metadata.get('trashed', False),
+            'is_shared': file_metadata.get('shared', False),
+            'web_view_link': file_metadata.get('webViewLink'),
+            'web_content_link': file_metadata.get('webContentLink'),
+            'thumbnail_link': file_metadata.get('thumbnailLink'),
+            'exists': True
+        }
+        
+    except HttpError as e:
+        if e.resp.status == 404:
+            return {'exists': False}
+        print(f"!!! [{account.id}] Google API error getting file info: {e.content}"); raise e
+    except Exception as e:
+        print(f"!!! [{account.id}] Unexpected error getting file info: {str(e)}"); raise e
+
+
+async def delete_file(gdrive_id: str, account: GoogleAccountConfig, permanent: bool = False) -> bool:
+    """
+    Deletes a file from Google Drive.
+    
+    Args:
+        gdrive_id: The ID of the file to delete
+        account: The Google account configuration to use
+        permanent: If True, permanently deletes the file. If False, moves to trash.
+        
+    Returns:
+        bool: True if successful, False otherwise
+        
+    Raises:
+        HttpError: If there's an API error
+        Exception: For other unexpected errors
+    """
+    try:
+        gdrive_pool_manager.tracker.increment_request_count(account.id)
+        service = _get_gdrive_service(account)
+        
+        if permanent:
+            # Permanently delete the file
+            await asyncio.to_thread(service.files().delete(fileId=gdrive_id).execute)
+            print(f"[{account.id}] Permanently deleted file {gdrive_id}")
+        else:
+            # Move to trash
+            await asyncio.to_thread(
+                service.files().update(
+                    fileId=gdrive_id,
+                    body={'trashed': True}
+                ).execute
+            )
+            print(f"[{account.id}] Moved file {gdrive_id} to trash")
+            
+        return True
+        
+    except HttpError as e:
+        if e.resp.status == 404:
+            print(f"[{account.id}] File {gdrive_id} not found, may have been already deleted"); return False
+        print(f"!!! [{account.id}] Google API error deleting file: {e.content}"); raise e
+    except Exception as e:
+        print(f"!!! [{account.id}] Unexpected error deleting file: {str(e)}"); raise e
+
+
+async def empty_trash(account: GoogleAccountConfig) -> Dict[str, int]:
+    """
+    Permanently deletes all trashed files for the given account.
+    
+    Args:
+        account: The Google account configuration to use
+        
+    Returns:
+        Dict with count of deleted files and total size
+        
+    Raises:
+        HttpError: If there's an API error
+        Exception: For other unexpected errors
+    """
+    try:
+        gdrive_pool_manager.tracker.increment_request_count(account.id)
+        service = _get_gdrive_service(account)
+        
+        # First list all trashed files
+        results = await asyncio.to_thread(
+            service.files().list(
+                q="trashed=true",
+                fields="files(id, size)",
+                pageSize=1000
+            ).execute
+        )
+        
+        trashed_files = results.get('files', [])
+        if not trashed_files:
+            return {'count': 0, 'total_size': 0}
+            
+        # Delete each file
+        deleted_count = 0
+        total_size = 0
+        
+        for file in trashed_files:
+            try:
+                await asyncio.to_thread(service.files().delete(fileId=file['id']).execute)
+                deleted_count += 1
+                total_size += int(file.get('size', 0))
+            except Exception as e:
+                print(f"!!! [{account.id}] Error deleting file {file['id']}: {str(e)}"); continue
+                
+        print(f"[{account.id}] Permanently deleted {deleted_count} files from trash"); return {'count': deleted_count, 'total_size': total_size}
+        
+    except HttpError as e:
+        print(f"!!! [{account.id}] Google API error emptying trash: {e.content}"); raise e
+    except Exception as e:
+        print(f"!!! [{account.id}] Unexpected error emptying trash: {str(e)}"); raise e
