@@ -1398,7 +1398,8 @@ async def list_drive_files(
     # Build query for files stored on Google Drive
     query = {
         "storage_location": StorageLocation.GDRIVE,
-        "status": UploadStatus.COMPLETED
+        "status": UploadStatus.COMPLETED,
+        "deleted_at": {"$exists": False}  # Exclude deleted files
     }
     
     # Search filter - search in filename
@@ -1473,19 +1474,41 @@ async def list_drive_files(
         file_doc["size_formatted"] = format_file_size(file_doc.get("size_bytes", 0))
         files.append(file_doc)
     
-    # Get drive-specific statistics
+    # Get drive-specific statistics (excluding deleted files)
     drive_stats = {
-        "total_files": db.files.count_documents({"storage_location": StorageLocation.GDRIVE, "status": UploadStatus.COMPLETED}),
+        "total_files": db.files.count_documents({
+            "storage_location": StorageLocation.GDRIVE, 
+            "status": UploadStatus.COMPLETED,
+            "deleted_at": {"$exists": False}  # Exclude deleted files
+        }),
         "total_storage": 0,
         "total_storage_formatted": "0 B",
-        "transferring_to_hetzner": db.files.count_documents({"storage_location": StorageLocation.GDRIVE, "backup_status": BackupStatus.IN_PROGRESS}),
-        "backed_up_to_hetzner": db.files.count_documents({"storage_location": StorageLocation.GDRIVE, "backup_status": BackupStatus.COMPLETED}),
-        "failed_backups": db.files.count_documents({"storage_location": StorageLocation.GDRIVE, "backup_status": BackupStatus.FAILED})
+        "transferring_to_hetzner": db.files.count_documents({
+            "storage_location": StorageLocation.GDRIVE, 
+            "backup_status": BackupStatus.IN_PROGRESS,
+            "deleted_at": {"$exists": False}  # Exclude deleted files
+        }),
+        "backed_up_to_hetzner": db.files.count_documents({
+            "storage_location": StorageLocation.GDRIVE, 
+            "backup_status": BackupStatus.COMPLETED,
+            "deleted_at": {"$exists": False}  # Exclude deleted files
+        }),
+        "failed_backups": db.files.count_documents({
+            "storage_location": StorageLocation.GDRIVE, 
+            "backup_status": BackupStatus.FAILED,
+            "deleted_at": {"$exists": False}  # Exclude deleted files
+        })
     }
     
-    # Calculate total storage
+    # Calculate total storage (excluding deleted files)
     storage_pipeline = [
-        {"$match": {"storage_location": StorageLocation.GDRIVE, "status": UploadStatus.COMPLETED}},
+        {
+            "$match": {
+                "storage_location": StorageLocation.GDRIVE, 
+                "status": UploadStatus.COMPLETED,
+                "deleted_at": {"$exists": False}  # Exclude deleted files
+            }
+        },
         {"$group": {"_id": None, "total_size": {"$sum": "$size_bytes"}}}
     ]
     storage_result = list(db.files.aggregate(storage_pipeline))
@@ -1518,9 +1541,15 @@ async def get_drive_analytics(
 ):
     """Get analytics for Google Drive files"""
     
-    # File type distribution
+    # File type distribution (excluding deleted files)
     type_pipeline = [
-        {"$match": {"storage_location": StorageLocation.GDRIVE, "status": UploadStatus.COMPLETED}},
+        {
+            "$match": {
+                "storage_location": StorageLocation.GDRIVE, 
+                "status": UploadStatus.COMPLETED,
+                "deleted_at": {"$exists": False}  # Exclude deleted files
+            }
+        },
         {"$group": {
             "_id": "$file_type",
             "count": {"$sum": 1},
@@ -1543,9 +1572,15 @@ async def get_drive_analytics(
             "percentage": percentage
         })
     
-    # Backup status distribution
+    # Backup status distribution (excluding deleted files)
     backup_pipeline = [
-        {"$match": {"storage_location": StorageLocation.GDRIVE, "status": UploadStatus.COMPLETED}},
+        {
+            "$match": {
+                "storage_location": StorageLocation.GDRIVE, 
+                "status": UploadStatus.COMPLETED,
+                "deleted_at": {"$exists": False}  # Exclude deleted files
+            }
+        },
         {"$group": {
             "_id": "$backup_status",
             "count": {"$sum": 1}
@@ -1557,9 +1592,15 @@ async def get_drive_analytics(
     for item in backup_results:
         backup_distribution[item["_id"]] = item["count"]
     
-    # Account distribution
+    # Account distribution (excluding deleted files)
     account_pipeline = [
-        {"$match": {"storage_location": StorageLocation.GDRIVE, "status": UploadStatus.COMPLETED}},
+        {
+            "$match": {
+                "storage_location": StorageLocation.GDRIVE, 
+                "status": UploadStatus.COMPLETED,
+                "deleted_at": {"$exists": False}  # Exclude deleted files
+            }
+        },
         {"$group": {
             "_id": "$gdrive_account_id",
             "count": {"$sum": 1},
@@ -1608,10 +1649,11 @@ async def list_hetzner_files(
 ):
     """List files that are backed up to Hetzner storage"""
     
-    # Build query for files backed up to Hetzner
+    # Build query for files backed up to Hetzner (excluding deleted files)
     query = {
         "backup_status": BackupStatus.COMPLETED,
-        "backup_location": StorageLocation.HETZNER
+        "backup_location": StorageLocation.HETZNER,
+        "deleted_at": {"$exists": False}  # Exclude deleted files
     }
     
     # Search filter - search in filename
@@ -1682,22 +1724,36 @@ async def list_hetzner_files(
         file_doc["size_formatted"] = format_file_size(file_doc.get("size_bytes", 0))
         files.append(file_doc)
     
-    # Get hetzner-specific statistics
+    # Get hetzner-specific statistics (excluding deleted files)
     hetzner_stats = {
-        "total_files": db.files.count_documents({"backup_status": BackupStatus.COMPLETED, "backup_location": StorageLocation.HETZNER}),
+        "total_files": db.files.count_documents({
+            "backup_status": BackupStatus.COMPLETED, 
+            "backup_location": StorageLocation.HETZNER,
+            "deleted_at": {"$exists": False}  # Exclude deleted files
+        }),
         "total_storage": 0,
         "total_storage_formatted": "0 B",
         "recent_backups": db.files.count_documents({
             "backup_status": BackupStatus.COMPLETED, 
             "backup_location": StorageLocation.HETZNER,
+            "deleted_at": {"$exists": False},  # Exclude deleted files
             "upload_date": {"$gte": datetime.utcnow() - timedelta(days=7)}
         }),
-        "failed_backups": db.files.count_documents({"backup_status": BackupStatus.FAILED})
+        "failed_backups": db.files.count_documents({
+            "backup_status": BackupStatus.FAILED,
+            "deleted_at": {"$exists": False}  # Exclude deleted files
+        })
     }
     
-    # Calculate total storage
+    # Calculate total storage (excluding deleted files)
     storage_pipeline = [
-        {"$match": {"backup_status": BackupStatus.COMPLETED, "backup_location": StorageLocation.HETZNER}},
+        {
+            "$match": {
+                "backup_status": BackupStatus.COMPLETED, 
+                "backup_location": StorageLocation.HETZNER,
+                "deleted_at": {"$exists": False}  # Exclude deleted files
+            }
+        },
         {"$group": {"_id": None, "total_size": {"$sum": "$size_bytes"}}}
     ]
     storage_result = list(db.files.aggregate(storage_pipeline))
@@ -1730,9 +1786,15 @@ async def get_hetzner_analytics(
 ):
     """Get analytics for Hetzner backup files"""
     
-    # File type distribution
+    # File type distribution (excluding deleted files)
     type_pipeline = [
-        {"$match": {"backup_status": BackupStatus.COMPLETED, "backup_location": StorageLocation.HETZNER}},
+        {
+            "$match": {
+                "backup_status": BackupStatus.COMPLETED, 
+                "backup_location": StorageLocation.HETZNER,
+                "deleted_at": {"$exists": False}  # Exclude deleted files
+            }
+        },
         {"$group": {
             "_id": "$file_type",
             "count": {"$sum": 1},
@@ -1755,13 +1817,16 @@ async def get_hetzner_analytics(
             "percentage": percentage
         })
     
-    # Backup timeline (last 30 days)
+    # Backup timeline (last 30 days) - excluding deleted files
     timeline_pipeline = [
-        {"$match": {
-            "backup_status": BackupStatus.COMPLETED, 
-            "backup_location": StorageLocation.HETZNER,
-            "upload_date": {"$gte": datetime.utcnow() - timedelta(days=30)}
-        }},
+        {
+            "$match": {
+                "backup_status": BackupStatus.COMPLETED, 
+                "backup_location": StorageLocation.HETZNER,
+                "deleted_at": {"$exists": False},  # Exclude deleted files
+                "upload_date": {"$gte": datetime.utcnow() - timedelta(days=30)}
+            }
+        },
         {"$group": {
             "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$upload_date"}},
             "count": {"$sum": 1},
@@ -1780,9 +1845,15 @@ async def get_hetzner_analytics(
             "size_formatted": format_file_size(item["total_size"])
         })
     
-    # Source account distribution
+    # Source account distribution (excluding deleted files)
     account_pipeline = [
-        {"$match": {"backup_status": BackupStatus.COMPLETED, "backup_location": StorageLocation.HETZNER}},
+        {
+            "$match": {
+                "backup_status": BackupStatus.COMPLETED, 
+                "backup_location": StorageLocation.HETZNER,
+                "deleted_at": {"$exists": False}  # Exclude deleted files
+            }
+        },
         {"$group": {
             "_id": "$gdrive_account_id",
             "count": {"$sum": 1},
