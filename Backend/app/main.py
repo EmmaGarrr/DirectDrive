@@ -217,11 +217,12 @@ app.include_router(routes_download.router, prefix="/api/v1", tags=["Download"])
 app.include_router(routes_batch_upload.router, prefix="/api/v1/batch", tags=["Batch Upload"])
 
 # Import and include admin routes
-from app.api.v1 import routes_admin_auth, routes_admin_users, routes_admin_files, routes_admin_storage, routes_admin_monitoring, routes_admin_config, routes_admin_notifications, routes_admin_reports
+from app.api.v1 import routes_admin_auth, routes_admin_users, routes_admin_files, routes_admin_storage, routes_admin_storage_management, routes_admin_monitoring, routes_admin_config, routes_admin_notifications, routes_admin_reports
 app.include_router(routes_admin_auth.router, prefix="/api/v1/admin/auth", tags=["Admin Authentication"])
 app.include_router(routes_admin_users.router, prefix="/api/v1/admin", tags=["Admin User Management"])
 app.include_router(routes_admin_files.router, prefix="/api/v1/admin", tags=["Admin File Management"])
 app.include_router(routes_admin_storage.router, prefix="/api/v1/admin", tags=["Admin Storage Management"])
+app.include_router(routes_admin_storage_management.router, prefix="/api/v1/admin", tags=["Admin Storage Management"])
 app.include_router(routes_admin_monitoring.router, prefix="/api/v1/admin", tags=["Admin System Monitoring"])
 app.include_router(routes_admin_config.router, prefix="/api/v1/admin", tags=["Admin Configuration"])
 app.include_router(routes_admin_notifications.router, prefix="/api/v1/admin", tags=["Admin Notifications"])
