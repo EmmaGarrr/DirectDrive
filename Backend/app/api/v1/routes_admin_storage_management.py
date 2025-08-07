@@ -8,7 +8,7 @@ import uuid
 
 from app.services.admin_auth_service import get_current_admin, log_admin_activity, get_client_ip
 from app.models.admin import AdminUserInDB
-from app.models.file import FileMetadataInDB, FileStorageStatus, FileStorageInfo
+from app.models.file import FileMetadataInDB, FileStorageStatus, FileStorageInfo, StorageLocation, UploadStatus, BackupStatus
 from app.db.mongodb import db
 from app.services import google_drive_service, hetzner_service
 from app.core.config import settings
@@ -49,6 +49,26 @@ class StorageFileInfo(BaseModel):
     content_type: Optional[str] = None
     is_directory: bool = False
 
+class AdminFileInfo(BaseModel):
+    file_id: str
+    filename: str
+    size_bytes: int
+    content_type: str
+    file_type: Optional[str] = None
+    owner: Optional[str] = None  # Owner email or 'Anonymous'
+    upload_date: datetime
+    status: str  # Current status (pending, available, failed)
+    storage: str  # Current location (gdrive, hetzner, pending)
+    error: Optional[str] = None  # Error message if any
+    url: Optional[HttpUrl] = None  # Download URL if available
+
+class AdminFileListResponse(BaseModel):
+    files: List[AdminFileInfo]
+    total: int
+    page: int
+    limit: int
+    total_pages: int
+    
 class StorageFileListResponse(BaseModel):
     files: List[StorageFileInfo]
     total: int
@@ -537,3 +557,197 @@ async def sync_file_storage(
     )
     
     return {"status": "sync_started", "file_id": file_id}
+
+
+@router.get("/admin/storage/files", response_model=AdminFileListResponse)
+async def get_admin_files(
+    request: Request,
+    storage_type: Optional[str] = Query(None, description="Filter by storage type: gdrive or hetzner"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    owner_type: Optional[str] = Query(None, description="Filter by owner type: anonymous or registered"),
+    search: Optional[str] = Query(None, description="Search by filename"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """
+    Get all files with metadata for admin panel storage management
+    """
+    # Log the request
+    await log_admin_activity(
+        admin_id=current_admin.id,
+        action="list_admin_files",
+        details={
+            "storage_type": storage_type,
+            "status": status,
+            "owner_type": owner_type,
+            "search": search,
+            "page": page,
+            "limit": limit
+        },
+        ip_address=get_client_ip(request)
+    )
+    
+    # Build the query
+    query = {}
+    
+    # Filter by storage type
+    if storage_type:
+        if storage_type.lower() == "gdrive":
+            query["gdrive_info.status"] = FileStorageStatus.AVAILABLE
+        elif storage_type.lower() == "hetzner":
+            query["hetzner_info.status"] = FileStorageStatus.AVAILABLE
+    
+    # Filter by status
+    if status:
+        if status.lower() in ["pending", "uploading", "available", "failed", "deleted"]:
+            if storage_type and storage_type.lower() == "gdrive":
+                query["gdrive_info.status"] = status.lower()
+            elif storage_type and storage_type.lower() == "hetzner":
+                query["hetzner_info.status"] = status.lower()
+            else:
+                # If no specific storage type, check both
+                query["$or"] = [
+                    {"gdrive_info.status": status.lower()},
+                    {"hetzner_info.status": status.lower()}
+                ]
+    
+    # Filter by owner type
+    if owner_type:
+        if owner_type.lower() == "anonymous":
+            query["owner_id"] = None
+        elif owner_type.lower() == "registered":
+            query["owner_id"] = {"$ne": None}
+    
+    # Search by filename
+    if search:
+        query["filename"] = {"$regex": search, "$options": "i"}
+    
+    try:
+        # Count total files matching the query
+        total_files = await db.files.count_documents(query)
+        
+        # Calculate pagination
+        skip = (page - 1) * limit
+        total_pages = (total_files + limit - 1) // limit if total_files > 0 else 1
+        
+        # Get files with pagination
+        cursor = db.files.find(query).sort("upload_date", -1).skip(skip).limit(limit)
+        files_data = await cursor.to_list(length=limit)
+        
+        # Transform to response model
+        files = []
+        for file_doc in files_data:
+            file_metadata = FileMetadataInDB(**file_doc)
+            
+            # Determine current storage location
+            storage = "pending"
+            if file_metadata.hetzner_info and file_metadata.hetzner_info.status == FileStorageStatus.AVAILABLE:
+                storage = "hetzner"
+            elif file_metadata.gdrive_info and file_metadata.gdrive_info.status == FileStorageStatus.AVAILABLE:
+                storage = "gdrive"
+            
+            # Determine current status
+            if storage == "pending":
+                status = "pending"
+            elif file_metadata.gdrive_info and file_metadata.gdrive_info.status == FileStorageStatus.FAILED:
+                status = "failed"
+            elif file_metadata.hetzner_info and file_metadata.hetzner_info.status == FileStorageStatus.FAILED:
+                status = "failed"
+            else:
+                status = "available"
+            
+            # Get error message if any
+            error = None
+            if file_metadata.gdrive_info and file_metadata.gdrive_info.error:
+                error = file_metadata.gdrive_info.error
+            if file_metadata.hetzner_info and file_metadata.hetzner_info.error:
+                error = file_metadata.hetzner_info.error
+            
+            # Get download URL if available
+            url = None
+            if file_metadata.hetzner_info and file_metadata.hetzner_info.url:
+                url = file_metadata.hetzner_info.url
+            elif file_metadata.gdrive_info and file_metadata.gdrive_info.url:
+                url = file_metadata.gdrive_info.url
+            
+            files.append(AdminFileInfo(
+                file_id=file_metadata.id,
+                filename=file_metadata.filename,
+                size_bytes=file_metadata.size_bytes,
+                content_type=file_metadata.content_type,
+                file_type=file_metadata.file_type,
+                owner=file_metadata.owner_email or "Anonymous",
+                upload_date=file_metadata.upload_date,
+                status=status,
+                storage=storage,
+                error=error,
+                url=url
+            ))
+        
+        return AdminFileListResponse(
+            files=files,
+            total=total_files,
+            page=page,
+            limit=limit,
+            total_pages=total_pages
+        )
+        
+    except Exception as e:
+        print(f"Error in get_admin_files: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching files: {str(e)}"
+        )
+
+
+@router.get("/admin/storage/files/gdrive", response_model=AdminFileListResponse)
+async def get_gdrive_files(
+    request: Request,
+    status: Optional[str] = Query(None, description="Filter by status"),
+    owner_type: Optional[str] = Query(None, description="Filter by owner type: anonymous or registered"),
+    search: Optional[str] = Query(None, description="Search by filename"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """
+    Get Google Drive files for admin panel
+    """
+    # Forward to the generic endpoint with storage_type=gdrive
+    return await get_admin_files(
+        request=request,
+        storage_type="gdrive",
+        status=status,
+        owner_type=owner_type,
+        search=search,
+        page=page,
+        limit=limit,
+        current_admin=current_admin
+    )
+
+
+@router.get("/admin/storage/files/hetzner", response_model=AdminFileListResponse)
+async def get_hetzner_files(
+    request: Request,
+    status: Optional[str] = Query(None, description="Filter by status"),
+    owner_type: Optional[str] = Query(None, description="Filter by owner type: anonymous or registered"),
+    search: Optional[str] = Query(None, description="Search by filename"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """
+    Get Hetzner files for admin panel
+    """
+    # Forward to the generic endpoint with storage_type=hetzner
+    return await get_admin_files(
+        request=request,
+        storage_type="hetzner",
+        status=status,
+        owner_type=owner_type,
+        search=search,
+        page=page,
+        limit=limit,
+        current_admin=current_admin
+    )
