@@ -573,7 +573,7 @@
 # # # # import io
 # # # # import json
 # # # # import time
-# # # # from typing import AsyncGenerator, Generator, List, Dict, Optional
+# # # # from typing import AsyncGenerator, List, Dict, Optional
 # # # # from collections import defaultdict
 # # # # import threading
 
@@ -951,141 +951,141 @@
 
 # # # In file: Backend/app/services/google_drive_service.py
 
-# # import asyncio
-# # import io
-# # import json
-# # import time
-# # from typing import AsyncGenerator, List, Dict, Optional
-# # from collections import defaultdict
-# # import threading
+# # # import asyncio
+# # # import io
+# # # import json
+# # # import time
+# # # from typing import AsyncGenerator, List, Dict, Optional
+# # # from collections import defaultdict
+# # # import threading
 
-# # from google.auth.transport.requests import AuthorizedSession
-# # from google.oauth2.credentials import Credentials
-# # from googleapiclient.discovery import build
-# # from googleapiclient.errors import HttpError
-# # # MediaIoBaseDownload is no longer needed for the new resilient download method
+# # # from google.auth.transport.requests import AuthorizedSession
+# # # from google.oauth2.credentials import Credentials
+# # # from googleapiclient.discovery import build
+# # # from googleapiclient.errors import HttpError
+# # # # MediaIoBaseDownload is no longer needed for the new resilient download method
 
-# # from app.core.config import settings, GoogleAccountConfig
+# # # from app.core.config import settings, GoogleAccountConfig
 
-# # SCOPES = ['https://www.googleapis.com/auth/drive']
-# # REQUEST_LIMIT_PER_MINUTE = 500
-# # DAILY_UPLOAD_LIMIT_BYTES = 740 * 1024 * 1024 * 1024
+# # # SCOPES = ['https://www.googleapis.com/auth/drive']
+# # # REQUEST_LIMIT_PER_MINUTE = 500
+# # # DAILY_UPLOAD_LIMIT_BYTES = 740 * 1024 * 1024 * 1024
 
-# # class ApiUsageTracker:
-# #     # ... (This class remains unchanged) ...
-# #     def __init__(self):
-# #         self._lock = threading.Lock()
-# #         self.requests = defaultdict(lambda: {"minute_timestamp": 0, "count": 0})
-# #         self.uploads = defaultdict(lambda: {"day_timestamp": 0, "bytes": 0})
+# # # class ApiUsageTracker:
+# # #     # ... (This class remains unchanged) ...
+# # #     def __init__(self):
+# # #         self._lock = threading.Lock()
+# # #         self.requests = defaultdict(lambda: {"minute_timestamp": 0, "count": 0})
+# # #         self.uploads = defaultdict(lambda: {"day_timestamp": 0, "bytes": 0})
 
-# #     def increment_request_count(self, account_id: str):
-# #         with self._lock:
-# #             current_minute = int(time.time() / 60)
-# #             if self.requests[account_id]["minute_timestamp"] != current_minute:
-# #                 self.requests[account_id]["minute_timestamp"] = current_minute
-# #                 self.requests[account_id]["count"] = 0
-# #             self.requests[account_id]["count"] += 1
+# # #     def increment_request_count(self, account_id: str):
+# # #         with self._lock:
+# # #             current_minute = int(time.time() / 60)
+# # #             if self.requests[account_id]["minute_timestamp"] != current_minute:
+# # #                 self.requests[account_id]["minute_timestamp"] = current_minute
+# # #                 self.requests[account_id]["count"] = 0
+# # #             self.requests[account_id]["count"] += 1
 
-# #     def increment_upload_volume(self, account_id: str, file_size_bytes: int):
-# #         with self._lock:
-# #             current_day = int(time.time() / 86400)
-# #             if self.uploads[account_id]["day_timestamp"] != current_day:
-# #                 self.uploads[account_id]["day_timestamp"] = current_day
-# #                 self.uploads[account_id]["bytes"] = 0
-# #             self.uploads[account_id]["bytes"] += file_size_bytes
+# # #     def increment_upload_volume(self, account_id: str, file_size_bytes: int):
+# # #         with self._lock:
+# # #             current_day = int(time.time() / 86400)
+# # #             if self.uploads[account_id]["day_timestamp"] != current_day:
+# # #                 self.uploads[account_id]["day_timestamp"] = current_day
+# # #                 self.uploads[account_id]["bytes"] = 0
+# # #             self.uploads[account_id]["bytes"] += file_size_bytes
 
-# #     def get_usage(self, account_id: str) -> dict:
-# #         with self._lock:
-# #             current_minute = int(time.time() / 60)
-# #             current_day = int(time.time() / 86400)
-# #             req_count = self.requests[account_id]["count"] if self.requests[account_id]["minute_timestamp"] == current_minute else 0
-# #             upload_bytes = self.uploads[account_id]["bytes"] if self.uploads[account_id]["day_timestamp"] == current_day else 0
-# #             return {"requests_this_minute": req_count, "bytes_today": upload_bytes}
+# # #     def get_usage(self, account_id: str) -> dict:
+# # #         with self._lock:
+# # #             current_minute = int(time.time() / 60)
+# # #             current_day = int(time.time() / 86400)
+# # #             req_count = self.requests[account_id]["count"] if self.requests[account_id]["minute_timestamp"] == current_minute else 0
+# # #             upload_bytes = self.uploads[account_id]["bytes"] if self.uploads[account_id]["day_timestamp"] == current_day else 0
+# # #             return {"requests_this_minute": req_count, "bytes_today": upload_bytes}
 
-# # class GoogleDrivePoolManager:
-# #     # ... (This class remains unchanged) ...
-# #     _instance = None
-# #     _lock = threading.Lock()
+# # # class GoogleDrivePoolManager:
+# # #     # ... (This class remains unchanged) ...
+# # #     _instance = None
+# # #     _lock = threading.Lock()
 
-# #     def __new__(cls, *args, **kwargs):
-# #         if not cls._instance:
-# #             with cls._lock:
-# #                 if not cls._instance:
-# #                     cls._instance = super(GoogleDrivePoolManager, cls).__new__(cls)
-# #         return cls._instance
+# # #     def __new__(cls, *args, **kwargs):
+# # #         if not cls._instance:
+# # #             with cls._lock:
+# # #                 if not cls._instance:
+# # #                     cls._instance = super(GoogleDrivePoolManager, cls).__new__(cls)
+# # #         return cls._instance
 
-# #     def __init__(self, accounts: List[GoogleAccountConfig]):
-# #         if not hasattr(self, '_initialized'):
-# #             self.accounts = accounts
-# #             self.account_map: Dict[str, GoogleAccountConfig] = {acc.id: acc for acc in accounts}
-# #             self.num_accounts = len(accounts)
-# #             self.current_account_index = 0
-# #             self.tracker = ApiUsageTracker()
-# #             self._async_lock = asyncio.Lock()
-# #             self._initialized = True
-# #             if self.num_accounts > 0:
-# #                 print(f"[GDRIVE_POOL] Initialized with {self.num_accounts} accounts. Active account: {self.get_current_account().id}")
+# # #     def __init__(self, accounts: List[GoogleAccountConfig]):
+# # #         if not hasattr(self, '_initialized'):
+# # #             self.accounts = accounts
+# # #             self.account_map: Dict[str, GoogleAccountConfig] = {acc.id: acc for acc in accounts}
+# # #             self.num_accounts = len(accounts)
+# # #             self.current_account_index = 0
+# # #             self.tracker = ApiUsageTracker()
+# # #             self._async_lock = asyncio.Lock()
+# # #             self._initialized = True
+# # #             if self.num_accounts > 0:
+# # #                 print(f"[GDRIVE_POOL] Initialized with {self.num_accounts} accounts. Active account: {self.get_current_account().id}")
 
-# #     def get_current_account(self) -> Optional[GoogleAccountConfig]:
-# #         if not self.accounts: return None
-# #         return self.accounts[self.current_account_index]
+# # #     def get_current_account(self) -> Optional[GoogleAccountConfig]:
+# # #         if not self.accounts: return None
+# # #         return self.accounts[self.current_account_index]
         
-# #     def get_account_by_id(self, account_id: str) -> Optional[GoogleAccountConfig]:
-# #         return self.account_map.get(account_id)
+# # #     def get_account_by_id(self, account_id: str) -> Optional[GoogleAccountConfig]:
+# # #         return self.account_map.get(account_id)
 
-# #     async def get_active_account(self) -> Optional[GoogleAccountConfig]:
-# #         if self.num_accounts == 0: return None
-# #         async with self._async_lock:
-# #             for _ in range(self.num_accounts):
-# #                 account = self.get_current_account()
-# #                 usage = self.tracker.get_usage(account.id)
-# #                 is_request_limit_ok = usage["requests_this_minute"] < REQUEST_LIMIT_PER_MINUTE
-# #                 is_upload_limit_ok = usage["bytes_today"] < DAILY_UPLOAD_LIMIT_BYTES
-# #                 if is_request_limit_ok and is_upload_limit_ok:
-# #                     print(f"[GDRIVE_POOL] Using active account: {account.id} (Requests: {usage['requests_this_minute']}, Uploaded: {usage['bytes_today'] / (1024**3):.2f} GB)")
-# #                     return account
-# #                 print(f"[GDRIVE_POOL] WARNING: Account {account.id} has reached its limit. Rotating to next account.")
-# #                 self.current_account_index = (self.current_account_index + 1) % self.num_accounts
-# #             print("[GDRIVE_POOL] CRITICAL: All Google Drive accounts have reached their API limits.")
-# #             return None
+# # #     async def get_active_account(self) -> Optional[GoogleAccountConfig]:
+# # #         if self.num_accounts == 0: return None
+# # #         async with self._async_lock:
+# # #             for _ in range(self.num_accounts):
+# # #                 account = self.get_current_account()
+# # #                 usage = self.tracker.get_usage(account.id)
+# # #                 is_request_limit_ok = usage["requests_this_minute"] < REQUEST_LIMIT_PER_MINUTE
+# # #                 is_upload_limit_ok = usage["bytes_today"] < DAILY_UPLOAD_LIMIT_BYTES
+# # #                 if is_request_limit_ok and is_upload_limit_ok:
+# # #                     print(f"[GDRIVE_POOL] Using active account: {account.id} (Requests: {usage['requests_this_minute']}, Uploaded: {usage['bytes_today'] / (1024**3):.2f} GB)")
+# # #                     return account
+# # #                 print(f"[GDRIVE_POOL] WARNING: Account {account.id} has reached its limit. Rotating to next account.")
+# # #                 self.current_account_index = (self.current_account_index + 1) % self.num_accounts
+# # #             print("[GDRIVE_POOL] CRITICAL: All Google Drive accounts have reached their API limits.")
+# # #             return None
 
-# # gdrive_pool_manager = GoogleDrivePoolManager(settings.GDRIVE_ACCOUNTS)
+# # # gdrive_pool_manager = GoogleDrivePoolManager(settings.GDRIVE_ACCOUNTS)
 
-# # # Helper function to get a "smart" session that auto-refreshes tokens
-# # def _get_authed_session(account: GoogleAccountConfig) -> AuthorizedSession:
-# #     creds = Credentials.from_authorized_user_info(
-# #         info={
-# #             "client_id": account.client_id,
-# #             "client_secret": account.client_secret,
-# #             "refresh_token": account.refresh_token,
-# #         },
-# #         scopes=SCOPES
-# #     )
-# #     return AuthorizedSession(creds)
+# # # # Helper function to get a "smart" session that auto-refreshes tokens
+# # # def _get_authed_session(account: GoogleAccountConfig) -> AuthorizedSession:
+# # #     creds = Credentials.from_authorized_user_info(
+# # #         info={
+# # #             "client_id": account.client_id,
+# # #             "client_secret": account.client_secret,
+# # #             "refresh_token": account.refresh_token,
+# # #         },
+# # #         scopes=SCOPES
+# # #     )
+# # #     return AuthorizedSession(creds)
 
-# # def create_resumable_upload_session(filename: str, filesize: int, account: GoogleAccountConfig) -> str:
-# #     # ... (This function remains unchanged) ...
-# #     try:
-# #         gdrive_pool_manager.tracker.increment_request_count(account.id)
-# #         metadata = {'name': filename, 'parents': [account.folder_id]}
-# #         headers = {'Content-Type': 'application/json; charset=UTF-8', 'X-Upload-Content-Type': 'application/octet-stream', 'X-Upload-Content-Length': str(filesize)}
-# #         authed_session = _get_authed_session(account)
-# #         print(f"[GDRIVE_SERVICE] [{account.id}] Initiating resumable session...")
-# #         init_response = authed_session.post('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', headers=headers, data=json.dumps(metadata))
-# #         init_response.raise_for_status()
-# #         upload_url = init_response.headers['Location']
-# #         print(f"[GDRIVE_SERVICE] [{account.id}] Session initiated successfully.")
-# #         return upload_url
-# #     except HttpError as e:
-# #         print(f"!!! [{account.id}] A Google API HTTP Error occurred: {e.content}")
-# #         raise e
-# #     except Exception as e:
-# #         print(f"!!! [{account.id}] An unexpected error occurred in create_resumable_upload_session: {e}")
-# #         raise e
+# # # def create_resumable_upload_session(filename: str, filesize: int, account: GoogleAccountConfig) -> str:
+# # #     # ... (This function remains unchanged) ...
+# # #     try:
+# # #         gdrive_pool_manager.tracker.increment_request_count(account.id)
+# # #         metadata = {'name': filename, 'parents': [account.folder_id]}
+# # #         headers = {'Content-Type': 'application/json; charset=UTF-8', 'X-Upload-Content-Type': 'application/octet-stream', 'X-Upload-Content-Length': str(filesize)}
+# # #         authed_session = _get_authed_session(account)
+# # #         print(f"[GDRIVE_SERVICE] [{account.id}] Initiating resumable session...")
+# # #         init_response = authed_session.post('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', headers=headers, data=json.dumps(metadata))
+# # #         init_response.raise_for_status()
+# # #         upload_url = init_response.headers['Location']
+# # #         print(f"[GDRIVE_SERVICE] [{account.id}] Session initiated successfully.")
+# # #         return upload_url
+# # #     except HttpError as e:
+# # #         print(f"!!! [{account.id}] A Google API HTTP Error occurred: {e.content}")
+# # #         raise e
+# # #     except Exception as e:
+# # #         print(f"!!! [{account.id}] An unexpected error occurred in create_resumable_upload_session: {e}")
+# # #         raise e
 
-# # # --- FINAL FIX: REWRITTEN DOWNLOAD FUNCTION ---
-# # async def async_stream_gdrive_file(gdrive_id: str, account: GoogleAccountConfig) -> AsyncGenerator[bytes, None]:
-# #     """
+# # # # --- FINAL FIX: REWRITTEN DOWNLOAD FUNCTION ---
+# # # async def async_stream_gdrive_file(gdrive_id: str, account: GoogleAccountConfig) -> AsyncGenerator[bytes, None]:
+# # #     """
 # #     Streams a file from Google Drive using a resilient, auto-refreshing
 # #     authorized session, making it suitable for very large files and long transfers.
 # #     """
@@ -1357,6 +1357,25 @@ class GoogleDrivePoolManager:
                 if usage["requests_this_minute"] < REQUEST_LIMIT_PER_MINUTE and usage["bytes_today"] < DAILY_UPLOAD_LIMIT_BYTES: return account
                 self.current_account_index = (self.current_account_index + 1) % self.num_accounts
             return None
+    async def delete_file(self, file_id: str) -> bool:
+        """Delete a file from Google Drive"""
+        try:
+            account = await self.get_active_account()
+            if not account:
+                raise Exception("No available Google Drive account")
+            
+            self.tracker.increment_request_count(account.id)
+            service = _get_gdrive_service(account)
+            
+            # Delete the file
+            service.files().delete(fileId=file_id).execute()
+            
+            print(f"[GDRIVE_DELETE] [{account.id}] Successfully deleted file {file_id}")
+            return True
+            
+        except Exception as e:
+            print(f"!!! [GDRIVE_DELETE] Error deleting file {file_id}: {e}")
+            raise e
 gdrive_pool_manager = GoogleDrivePoolManager(settings.GDRIVE_ACCOUNTS)
 
 # --- The build() service object is smart enough to handle its own auth ---
