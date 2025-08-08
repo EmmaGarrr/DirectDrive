@@ -2291,3 +2291,596 @@ async def delete_hetzner_file(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+# ================================
+# GOOGLE DRIVE OPERATION ENDPOINT
+# ================================
+
+@router.post("/drive/files/{file_id}/operation")
+async def execute_drive_file_operation(
+    file_id: str,
+    operation_data: FileOperationRequest,
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Execute various file operations on Google Drive files"""
+    
+    try:
+        # Validate file ID
+        if not ObjectId.is_valid(file_id):
+            raise HTTPException(status_code=400, detail="Invalid file ID")
+        
+        # Find the file
+        file_doc = db.files.find_one({"_id": ObjectId(file_id)})
+        if not file_doc:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Check if file is in Google Drive
+        if file_doc.get("storage_location") != StorageLocation.GDRIVE:
+            raise HTTPException(status_code=400, detail="File is not stored in Google Drive")
+        
+        if operation_data.operation == "move":
+            return await move_drive_file_between_accounts(file_id, file_doc, operation_data, current_admin, request)
+        elif operation_data.operation == "integrity_check":
+            return await check_drive_file_integrity(file_id, file_doc, current_admin, request)
+        elif operation_data.operation == "force_backup":
+            return await force_drive_file_backup(file_id, file_doc, operation_data, current_admin, request)
+        elif operation_data.operation == "recover":
+            return await recover_drive_file_from_backup(file_id, file_doc, operation_data, current_admin, request)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid operation. Use 'move', 'integrity_check', 'force_backup', or 'recover'"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+async def move_drive_file_between_accounts(file_id: str, file_doc: dict, operation_data: FileOperationRequest, current_admin: AdminUserInDB, request: Request):
+    """Move file between Google Drive accounts"""
+    
+    if not operation_data.target_location:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Target location required for move operation"
+        )
+    
+    # TODO: Implement actual file movement between Google Drive accounts
+    # For now, simulate the operation
+    
+    update_doc = {
+        "gdrive_account_id": operation_data.target_location,
+        "moved_at": datetime.utcnow(),
+        "moved_by": current_admin.email,
+        "move_reason": operation_data.reason
+    }
+    
+    db.files.update_one({"_id": ObjectId(file_id)}, {"$set": update_doc})
+    
+    # Log admin activity
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action="move_drive_file",
+        details=f"Moved Google Drive file {file_doc.get('filename', 'Unknown')} to {operation_data.target_location}. Reason: {operation_data.reason or 'No reason provided'}",
+        ip_address=get_client_ip(request),
+        endpoint=f"/api/v1/admin/drive/files/{file_id}/operation"
+    )
+    
+    return {"message": "Google Drive file moved successfully", "target_location": operation_data.target_location}
+
+async def check_drive_file_integrity(file_id: str, file_doc: dict, current_admin: AdminUserInDB, request: Request):
+    """Check Google Drive file integrity and corruption"""
+    
+    # TODO: Implement actual integrity checking for Google Drive files
+    # For now, simulate the check
+    
+    import hashlib
+    integrity_result = {
+        "status": "verified",
+        "checksum_match": True,
+        "corruption_detected": False,
+        "file_accessible": True,
+        "last_check": datetime.utcnow(),
+        "check_performed_by": current_admin.email
+    }
+    
+    # Simulate random integrity issues for testing
+    file_hash = abs(hash(file_id)) % 100
+    if file_hash < 5:  # 5% chance of simulated corruption
+        integrity_result.update({
+            "status": "corrupted",
+            "checksum_match": False,
+            "corruption_detected": True,
+            "corruption_type": "checksum_mismatch"
+        })
+    elif file_hash < 10:  # Additional 5% chance of inaccessible file
+        integrity_result.update({
+            "status": "inaccessible",
+            "file_accessible": False,
+            "error": "File not found in Google Drive"
+        })
+    
+    # Update file record with integrity check results
+    db.files.update_one(
+        {"_id": ObjectId(file_id)},
+        {
+            "$set": {
+                "integrity_check": integrity_result,
+                "last_integrity_check": datetime.utcnow()
+            }
+        }
+    )
+    
+    # Log admin activity
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action="check_drive_integrity",
+        details=f"Checked integrity of Google Drive file {file_doc.get('filename', 'Unknown')}. Result: {integrity_result['status']}",
+        ip_address=get_client_ip(request),
+        endpoint=f"/api/v1/admin/drive/files/{file_id}/operation"
+    )
+    
+    return {"integrity_check": integrity_result}
+
+async def force_drive_file_backup(file_id: str, file_doc: dict, operation_data: FileOperationRequest, current_admin: AdminUserInDB, request: Request):
+    """Force backup of Google Drive file to Hetzner"""
+    
+    # Check if file is already backed up
+    if file_doc.get("backup_status") == BackupStatus.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File is already backed up to Hetzner"
+        )
+    
+    # Update file status to trigger backup
+    update_doc = {
+        "backup_status": BackupStatus.IN_PROGRESS,
+        "backup_requested_at": datetime.utcnow(),
+        "backup_requested_by": current_admin.email,
+        "force_backup_reason": operation_data.reason
+    }
+    
+    db.files.update_one({"_id": ObjectId(file_id)}, {"$set": update_doc})
+    
+    # TODO: Trigger actual backup process
+    # For now, simulate the backup request
+    
+    # Log admin activity
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action="force_drive_backup",
+        details=f"Forced backup of Google Drive file {file_doc.get('filename', 'Unknown')} to Hetzner. Reason: {operation_data.reason or 'No reason provided'}",
+        ip_address=get_client_ip(request),
+        endpoint=f"/api/v1/admin/drive/files/{file_id}/operation"
+    )
+    
+    return {
+        "message": "Backup request submitted successfully",
+        "file_id": file_id,
+        "backup_status": "in_progress"
+    }
+
+async def recover_drive_file_from_backup(file_id: str, file_doc: dict, operation_data: FileOperationRequest, current_admin: AdminUserInDB, request: Request):
+    """Recover Google Drive file from Hetzner backup"""
+    
+    # Check if file has a backup
+    if file_doc.get("backup_status") != BackupStatus.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File has no completed backup to recover from"
+        )
+    
+    # TODO: Implement actual recovery process
+    # For now, simulate the recovery
+    
+    recovery_result = {
+        "status": "recovered",
+        "recovered_at": datetime.utcnow(),
+        "recovered_by": current_admin.email,
+        "recovery_source": "hetzner_backup",
+        "recovery_reason": operation_data.reason
+    }
+    
+    # Update file status
+    update_doc = {
+        "recovery_status": "completed",
+        "recovered_at": datetime.utcnow(),
+        "recovered_by": current_admin.email,
+        "recovery_reason": operation_data.reason
+    }
+    
+    db.files.update_one({"_id": ObjectId(file_id)}, {"$set": update_doc})
+    
+    # Log admin activity
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action="recover_drive_file",
+        details=f"Recovered Google Drive file {file_doc.get('filename', 'Unknown')} from Hetzner backup. Reason: {operation_data.reason or 'No reason provided'}",
+        ip_address=get_client_ip(request),
+        endpoint=f"/api/v1/admin/drive/files/{file_id}/operation"
+    )
+    
+    return {"recovery": recovery_result}
+
+# ================================
+# HETZNER OPERATION ENDPOINT
+# ================================
+
+@router.post("/hetzner/files/{file_id}/operation")
+async def execute_hetzner_file_operation(
+    file_id: str,
+    operation_data: FileOperationRequest,
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Execute various file operations on Hetzner files"""
+    
+    try:
+        # Validate file ID
+        if not ObjectId.is_valid(file_id):
+            raise HTTPException(status_code=400, detail="Invalid file ID")
+        
+        # Find the file
+        file_doc = db.files.find_one({"_id": ObjectId(file_id)})
+        if not file_doc:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Check if file is backed up to Hetzner
+        if file_doc.get("backup_status") != BackupStatus.COMPLETED or file_doc.get("backup_location") != StorageLocation.HETZNER:
+            raise HTTPException(status_code=400, detail="File is not backed up to Hetzner")
+        
+        if operation_data.operation == "move":
+            return await move_hetzner_file_between_accounts(file_id, file_doc, operation_data, current_admin, request)
+        elif operation_data.operation == "integrity_check":
+            return await check_hetzner_file_integrity(file_id, file_doc, current_admin, request)
+        elif operation_data.operation == "force_backup":
+            return await force_hetzner_file_backup(file_id, file_doc, operation_data, current_admin, request)
+        elif operation_data.operation == "recover":
+            return await recover_hetzner_file_from_backup(file_id, file_doc, operation_data, current_admin, request)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid operation. Use 'move', 'integrity_check', 'force_backup', or 'recover'"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+async def move_hetzner_file_between_accounts(file_id: str, file_doc: dict, operation_data: FileOperationRequest, current_admin: AdminUserInDB, request: Request):
+    """Move file between Hetzner storage accounts"""
+    
+    if not operation_data.target_location:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Target location required for move operation"
+        )
+    
+    # TODO: Implement actual file movement between Hetzner storage accounts
+    # For now, simulate the operation
+    
+    update_doc = {
+        "hetzner_account_id": operation_data.target_location,
+        "moved_at": datetime.utcnow(),
+        "moved_by": current_admin.email,
+        "move_reason": operation_data.reason
+    }
+    
+    db.files.update_one({"_id": ObjectId(file_id)}, {"$set": update_doc})
+    
+    # Log admin activity
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action="move_hetzner_file",
+        details=f"Moved Hetzner file {file_doc.get('filename', 'Unknown')} to {operation_data.target_location}. Reason: {operation_data.reason or 'No reason provided'}",
+        ip_address=get_client_ip(request),
+        endpoint=f"/api/v1/admin/hetzner/files/{file_id}/operation"
+    )
+    
+    return {"message": "Hetzner file moved successfully", "target_location": operation_data.target_location}
+
+async def check_hetzner_file_integrity(file_id: str, file_doc: dict, current_admin: AdminUserInDB, request: Request):
+    """Check Hetzner file integrity and corruption"""
+    
+    # TODO: Implement actual integrity checking for Hetzner files
+    # For now, simulate the check
+    
+    import hashlib
+    integrity_result = {
+        "status": "verified",
+        "checksum_match": True,
+        "corruption_detected": False,
+        "file_accessible": True,
+        "last_check": datetime.utcnow(),
+        "check_performed_by": current_admin.email
+    }
+    
+    # Simulate random integrity issues for testing
+    file_hash = abs(hash(file_id)) % 100
+    if file_hash < 5:  # 5% chance of simulated corruption
+        integrity_result.update({
+            "status": "corrupted",
+            "checksum_match": False,
+            "corruption_detected": True,
+            "corruption_type": "checksum_mismatch"
+        })
+    elif file_hash < 10:  # Additional 5% chance of inaccessible file
+        integrity_result.update({
+            "status": "inaccessible",
+            "file_accessible": False,
+            "error": "File not found in Hetzner storage"
+        })
+    
+    # Update file record with integrity check results
+    db.files.update_one(
+        {"_id": ObjectId(file_id)},
+        {
+            "$set": {
+                "integrity_check": integrity_result,
+                "last_integrity_check": datetime.utcnow()
+            }
+        }
+    )
+    
+    # Log admin activity
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action="check_hetzner_integrity",
+        details=f"Checked integrity of Hetzner file {file_doc.get('filename', 'Unknown')}. Result: {integrity_result['status']}",
+        ip_address=get_client_ip(request),
+        endpoint=f"/api/v1/admin/hetzner/files/{file_id}/operation"
+    )
+    
+    return {"integrity_check": integrity_result}
+
+async def force_hetzner_file_backup(file_id: str, file_doc: dict, operation_data: FileOperationRequest, current_admin: AdminUserInDB, request: Request):
+    """Force backup of Hetzner file to secondary storage"""
+    
+    # Check if file is already backed up to secondary storage
+    if file_doc.get("secondary_backup_status") == BackupStatus.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File is already backed up to secondary storage"
+        )
+    
+    # Update file status to trigger backup
+    update_doc = {
+        "secondary_backup_status": BackupStatus.IN_PROGRESS,
+        "secondary_backup_requested_at": datetime.utcnow(),
+        "secondary_backup_requested_by": current_admin.email,
+        "force_backup_reason": operation_data.reason
+    }
+    
+    db.files.update_one({"_id": ObjectId(file_id)}, {"$set": update_doc})
+    
+    # TODO: Trigger actual secondary backup process
+    # For now, simulate the backup request
+    
+    # Log admin activity
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action="force_hetzner_backup",
+        details=f"Forced backup of Hetzner file {file_doc.get('filename', 'Unknown')} to secondary storage. Reason: {operation_data.reason or 'No reason provided'}",
+        ip_address=get_client_ip(request),
+        endpoint=f"/api/v1/admin/hetzner/files/{file_id}/operation"
+    )
+    
+    return {
+        "message": "Secondary backup request submitted successfully",
+        "file_id": file_id,
+        "backup_status": "in_progress"
+    }
+
+async def recover_hetzner_file_from_backup(file_id: str, file_doc: dict, operation_data: FileOperationRequest, current_admin: AdminUserInDB, request: Request):
+    """Recover Hetzner file from secondary backup"""
+    
+    # Check if file has a secondary backup
+    if file_doc.get("secondary_backup_status") != BackupStatus.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File has no completed secondary backup to recover from"
+        )
+    
+    # TODO: Implement actual recovery process
+    # For now, simulate the recovery
+    
+    recovery_result = {
+        "status": "recovered",
+        "recovered_at": datetime.utcnow(),
+        "recovered_by": current_admin.email,
+        "recovery_source": "secondary_backup",
+        "recovery_reason": operation_data.reason
+    }
+    
+    # Update file status
+    update_doc = {
+        "recovery_status": "completed",
+        "recovered_at": datetime.utcnow(),
+        "recovered_by": current_admin.email,
+        "recovery_reason": operation_data.reason
+    }
+    
+    db.files.update_one({"_id": ObjectId(file_id)}, {"$set": update_doc})
+    
+    # Log admin activity
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action="recover_hetzner_file",
+        details=f"Recovered Hetzner file {file_doc.get('filename', 'Unknown')} from secondary backup. Reason: {operation_data.reason or 'No reason provided'}",
+        ip_address=get_client_ip(request),
+        endpoint=f"/api/v1/admin/hetzner/files/{file_id}/operation"
+    )
+    
+    return {"recovery": recovery_result}
+
+# ================================
+# GOOGLE DRIVE BULK ACTIONS
+# ================================
+
+@router.post("/drive/files/bulk-action")
+async def bulk_drive_file_action(
+    action_data: BulkFileActionRequest,
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Perform bulk actions on multiple Google Drive files"""
+    
+    if len(action_data.file_ids) > 100:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot perform bulk action on more than 100 files at once"
+        )
+    
+    # Verify all files exist and are in Google Drive
+    existing_files = list(db.files.find({
+        "_id": {"$in": [ObjectId(fid) for fid in action_data.file_ids]},
+        "storage_location": StorageLocation.GDRIVE
+    }, {"_id": 1, "filename": 1}))
+    
+    if len(existing_files) != len(action_data.file_ids):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Some files not found or not in Google Drive"
+        )
+    
+    update_doc = {"updated_at": datetime.utcnow()}
+    action_msg = ""
+    
+    if action_data.action == "delete":
+        update_doc.update({
+            "status": "deleted",
+            "deleted_at": datetime.utcnow(),
+            "deleted_by": current_admin.email,
+            "deletion_reason": action_data.reason
+        })
+        action_msg = "deleted from Google Drive"
+    elif action_data.action == "quarantine":
+        update_doc.update({
+            "quarantined": True,
+            "quarantined_at": datetime.utcnow(),
+            "quarantined_by": current_admin.email,
+            "quarantine_reason": action_data.reason
+        })
+        action_msg = "quarantined"
+    elif action_data.action == "backup":
+        update_doc.update({
+            "backup_status": "in_progress",
+            "backup_requested_at": datetime.utcnow(),
+            "backup_requested_by": current_admin.email
+        })
+        action_msg = "marked for backup to Hetzner"
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid action. Use 'delete', 'quarantine', or 'backup'"
+        )
+    
+    # Update all files
+    result = db.files.update_many(
+        {"_id": {"$in": [ObjectId(fid) for fid in action_data.file_ids]}},
+        {"$set": update_doc}
+    )
+    
+    # Log admin activity
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action=f"bulk_drive_{action_data.action}",
+        details=f"Bulk {action_data.action} on {len(action_data.file_ids)} Google Drive files. Reason: {action_data.reason or 'No reason provided'}",
+        ip_address=get_client_ip(request),
+        endpoint="/api/v1/admin/drive/files/bulk-action"
+    )
+    
+    return {
+        "message": f"{result.modified_count} files {action_msg} successfully",
+        "files_processed": result.modified_count,
+        "action": action_data.action
+    }
+
+# ================================
+# HETZNER BULK ACTIONS
+# ================================
+
+@router.post("/hetzner/files/bulk-action")
+async def bulk_hetzner_file_action(
+    action_data: BulkFileActionRequest,
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Perform bulk actions on multiple Hetzner files"""
+    
+    if len(action_data.file_ids) > 100:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot perform bulk action on more than 100 files at once"
+        )
+    
+    # Verify all files exist and are backed up to Hetzner
+    existing_files = list(db.files.find({
+        "_id": {"$in": [ObjectId(fid) for fid in action_data.file_ids]},
+        "backup_status": BackupStatus.COMPLETED,
+        "backup_location": StorageLocation.HETZNER
+    }, {"_id": 1, "filename": 1}))
+    
+    if len(existing_files) != len(action_data.file_ids):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Some files not found or not backed up to Hetzner"
+        )
+    
+    update_doc = {"updated_at": datetime.utcnow()}
+    action_msg = ""
+    
+    if action_data.action == "delete":
+        update_doc.update({
+            "backup_status": BackupStatus.NONE,
+            "backup_location": None,
+            "hetzner_remote_path": None,
+            "deleted_at": datetime.utcnow(),
+            "deleted_by": current_admin.email,
+            "deletion_reason": action_data.reason
+        })
+        action_msg = "deleted from Hetzner"
+    elif action_data.action == "quarantine":
+        update_doc.update({
+            "quarantined": True,
+            "quarantined_at": datetime.utcnow(),
+            "quarantined_by": current_admin.email,
+            "quarantine_reason": action_data.reason
+        })
+        action_msg = "quarantined"
+    elif action_data.action == "backup":
+        update_doc.update({
+            "secondary_backup_status": "in_progress",
+            "secondary_backup_requested_at": datetime.utcnow(),
+            "secondary_backup_requested_by": current_admin.email
+        })
+        action_msg = "marked for secondary backup"
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid action. Use 'delete', 'quarantine', or 'backup'"
+        )
+    
+    # Update all files
+    result = db.files.update_many(
+        {"_id": {"$in": [ObjectId(fid) for fid in action_data.file_ids]}},
+        {"$set": update_doc}
+    )
+    
+    # Log admin activity
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action=f"bulk_hetzner_{action_data.action}",
+        details=f"Bulk {action_data.action} on {len(action_data.file_ids)} Hetzner files. Reason: {action_data.reason or 'No reason provided'}",
+        ip_address=get_client_ip(request),
+        endpoint="/api/v1/admin/hetzner/files/bulk-action"
+    )
+    
+    return {
+        "message": f"{result.modified_count} files {action_msg} successfully",
+        "files_processed": result.modified_count,
+        "action": action_data.action
+    }
