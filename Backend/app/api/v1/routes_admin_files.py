@@ -1446,7 +1446,10 @@ async def list_drive_files(
     
     # Owner filter
     if owner_email:
-        query["owner_email"] = {"$regex": re.escape(owner_email), "$options": "i"}
+        # Get user by email
+        user = db.users.find_one({"email": owner_email})
+        if user:
+            query["owner_id"] = user["_id"]
     
     # Backup status filter
     if backup_status:
@@ -1471,6 +1474,14 @@ async def list_drive_files(
     for file_doc in files_cursor:
         file_doc["_id"] = str(file_doc["_id"])
         file_doc["size_formatted"] = format_file_size(file_doc.get("size_bytes", 0))
+        
+        # Enrich files with owner information
+        if file_doc.get("owner_id"):
+            owner = db.users.find_one({"_id": file_doc["owner_id"]}, {"email": 1, "_id": 0})
+            file_doc["owner_email"] = owner["email"] if owner else "Unknown"
+        else:
+            file_doc["owner_email"] = "Anonymous"
+        
         files.append(file_doc)
     
     # Get drive-specific statistics
@@ -1659,7 +1670,10 @@ async def list_hetzner_files(
     
     # Owner filter
     if owner_email:
-        query["owner_email"] = {"$regex": re.escape(owner_email), "$options": "i"}
+        # Get user by email
+        user = db.users.find_one({"email": owner_email})
+        if user:
+            query["owner_id"] = user["_id"]
     
     # Build sort
     sort_field = sort_by if sort_by in ["filename", "size_bytes", "upload_date", "backup_status"] else "upload_date"
@@ -1680,6 +1694,14 @@ async def list_hetzner_files(
     for file_doc in files_cursor:
         file_doc["_id"] = str(file_doc["_id"])
         file_doc["size_formatted"] = format_file_size(file_doc.get("size_bytes", 0))
+        
+        # Enrich files with owner information
+        if file_doc.get("owner_id"):
+            owner = db.users.find_one({"_id": file_doc["owner_id"]}, {"email": 1, "_id": 0})
+            file_doc["owner_email"] = owner["email"] if owner else "Unknown"
+        else:
+            file_doc["owner_email"] = "Anonymous"
+        
         files.append(file_doc)
     
     # Get hetzner-specific statistics
