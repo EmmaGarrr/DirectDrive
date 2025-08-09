@@ -180,12 +180,18 @@ class GoogleDriveAccountService:
             # Update last activity
             await GoogleDriveAccountService.update_account_activity(account_id)
             
-            # Update files count and storage used
-            files_count = db.files.count_documents({"gdrive_account_id": account_id})
+            # Update files count and storage used (exclude deleted files)
+            files_count = db.files.count_documents({
+                "gdrive_account_id": account_id,
+                "deleted_at": {"$exists": False}
+            })
             
-            # Calculate total storage used by this account
+            # Calculate total storage used by this account (exclude deleted files)
             storage_result = db.files.aggregate([
-                {"$match": {"gdrive_account_id": account_id}},
+                {"$match": {
+                    "gdrive_account_id": account_id,
+                    "deleted_at": {"$exists": False}
+                }},
                 {"$group": {"_id": None, "total_size": {"$sum": "$size_bytes"}}}
             ])
             storage_used = next(storage_result, {}).get("total_size", 0)

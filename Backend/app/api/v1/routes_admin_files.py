@@ -386,12 +386,11 @@ async def delete_file(
     db.files.update_one({"_id": file_id}, {"$set": update_doc})
     
     # 4. Update Google Drive account stats if file was in Google Drive
-    if gdrive_account_id and not deletion_errors:
+    if gdrive_account_id:
         try:
-            account = await GoogleDriveAccountService.get_account_by_id(gdrive_account_id)
-            if account:
-                await GoogleDriveAccountService._update_account_quota(account)
-                print(f"[DELETE_FILE] Updated stats for Google Drive account {gdrive_account_id}")
+            # Use MongoDB-based stats update for immediate consistency
+            await GoogleDriveAccountService.update_account_after_file_operation(gdrive_account_id)
+            print(f"[DELETE_FILE] Updated stats for Google Drive account {gdrive_account_id}")
         except Exception as e:
             print(f"[DELETE_FILE] Error updating account stats: {e}")
             # Don't add to deletion_errors as this is not critical for file deletion
