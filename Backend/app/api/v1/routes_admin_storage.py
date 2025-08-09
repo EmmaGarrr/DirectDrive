@@ -100,9 +100,11 @@ async def list_google_drive_accounts(
             response_data["data_freshness"] = "fresh" if time_diff < 300 else "stale"  # 5 minutes = 300 seconds
             print(f"🔄 [LIST_ACCOUNTS] Account {acc.account_id}: current_time={current_time}, last_quota_check={acc.last_quota_check}, time_diff={time_diff:.1f}s, freshness={response_data['data_freshness']}")
             print(f"🔄 [LIST_ACCOUNTS] Account {acc.account_id}: files_count={acc.files_count}, storage_used={acc.storage_used}")
+            print(f"🚀 [API_RESPONSE] Account {acc.account_id}: Sending to frontend - last_quota_check={response_data['last_quota_check']}, data_freshness={response_data['data_freshness']}")
         else:
             response_data["data_freshness"] = "stale"
             print(f"🔄 [LIST_ACCOUNTS] Account {acc.account_id}: NO last_quota_check timestamp!")
+            print(f"🚀 [API_RESPONSE] Account {acc.account_id}: Sending to frontend - last_quota_check=None, data_freshness=stale")
         
         account_responses.append(response_data)
 

@@ -656,16 +656,28 @@ class GoogleDriveAccountService:
 
                 files = files_result.get('files', [])
                 
-                # ENHANCED: Filter files to only include those actually in the target folder
-                # This prevents counting shared files from other folders
+                # OPTION: Count ALL accessible files vs only files in target folder
+                # CURRENT: Only files physically in the target folder (parent = folder_id)
+                # ALTERNATIVE: All files accessible to this account (remove this filter block)
                 if account.folder_id:
                     filtered_files = []
                     for file in files:
                         file_parents = file.get('parents', [])
                         if account.folder_id in file_parents:
                             filtered_files.append(file)
+                    
+                    # Debug: Show what we're filtering
+                    print(f"🔧 [FIX] {account.account_id}: Found {len(files_result.get('files', []))} total accessible files")
+                    print(f"🔧 [FIX] {account.account_id}: Filtered to {len(filtered_files)} files actually in target folder '{account.folder_id}'")
+                    
+                    # Show some filtered-out files for debugging
+                    all_files = files_result.get('files', [])
+                    filtered_out = [f for f in all_files if f not in filtered_files]
+                    for i, file in enumerate(filtered_out[:3]):  # Show first 3 filtered-out files
+                        parents = file.get('parents', [])
+                        print(f"🔧 [DEBUG] {account.account_id}: Filtered OUT: {file.get('name')} (parents: {parents})")
+                    
                     files = filtered_files
-                    print(f"🔧 [FIX] {account.account_id}: Filtered {len(files_result.get('files', []))} total files to {len(files)} files actually in target folder")
                 
                 page_files_count = len(files)
                 page_storage_used = sum(int(f.get('size', 0)) for f in files)
