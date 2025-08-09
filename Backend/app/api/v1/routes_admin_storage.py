@@ -93,13 +93,16 @@ async def list_google_drive_accounts(
             "folder_path": acc.folder_path or "/",
         }
         response_data["last_quota_check"] = acc.last_quota_check.isoformat() if acc.last_quota_check else None
-        # Fix: Use total_seconds() instead of .seconds to get the full time difference
+        # Fix: Use total_seconds() instead of .seconds to get the full time difference  
+        current_time = datetime.utcnow()
         if acc.last_quota_check:
-            time_diff = (datetime.utcnow() - acc.last_quota_check).total_seconds()
+            time_diff = (current_time - acc.last_quota_check).total_seconds()
             response_data["data_freshness"] = "fresh" if time_diff < 300 else "stale"  # 5 minutes = 300 seconds
-            print(f"🔄 [LIST_ACCOUNTS] Account {acc.account_id}: last_quota_check={acc.last_quota_check}, time_diff={time_diff:.1f}s, freshness={response_data['data_freshness']}")
+            print(f"🔄 [LIST_ACCOUNTS] Account {acc.account_id}: current_time={current_time}, last_quota_check={acc.last_quota_check}, time_diff={time_diff:.1f}s, freshness={response_data['data_freshness']}")
+            print(f"🔄 [LIST_ACCOUNTS] Account {acc.account_id}: files_count={acc.files_count}, storage_used={acc.storage_used}")
         else:
             response_data["data_freshness"] = "stale"
+            print(f"🔄 [LIST_ACCOUNTS] Account {acc.account_id}: NO last_quota_check timestamp!")
         
         account_responses.append(response_data)
 

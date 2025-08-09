@@ -561,15 +561,51 @@ class GoogleDriveAccountService:
             files_query = "trashed = false"
             if account.folder_id:
                 files_query = f"'{account.folder_id}' in parents and trashed = false"
+                
+            print(f"🔍 [API_DEBUG] {account.account_id}: folder_id={account.folder_id}")
+            print(f"🔍 [API_DEBUG] {account.account_id}: Using query: {files_query}")
+
+            # First, let's also test a simpler query to compare results
+            try:
+                # Test 1: Simple query to see total files visible to this account
+                simple_result = service.files().list(
+                    q="trashed = false",
+                    fields="files(id)",
+                    pageSize=1,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                ).execute()
+                print(f"🔍 [API_DEBUG] {account.account_id}: Can access {len(simple_result.get('files', []))} files with simple query (testing auth)")
+                
+                # Test 2: Check if folder exists and get its metadata
+                if account.folder_id:
+                    try:
+                        folder_metadata = service.files().get(
+                            fileId=account.folder_id,
+                            fields="id,name,permissions,parents,shared,owners",
+                            supportsAllDrives=True
+                        ).execute()
+                        print(f"🔍 [API_DEBUG] {account.account_id}: Folder metadata: {folder_metadata}")
+                    except Exception as e:
+                        print(f"🔍 [API_DEBUG] {account.account_id}: ERROR accessing folder metadata: {e}")
+                        
+            except Exception as e:
+                print(f"🔍 [API_DEBUG] {account.account_id}: ERROR with test queries: {e}")
 
             # Paginate through all files to compute accurate totals and counts
             next_page_token = None
             files_count = 0
             storage_used = 0
+            page_num = 1
+            
+            print(f"🔍 [API_DEBUG] {account.account_id}: Starting file enumeration with query: {files_query}")
+            
             while True:
+                print(f"🔍 [API_DEBUG] {account.account_id}: Fetching page {page_num} (pageToken: {next_page_token or 'None'})")
+                
                 files_result = service.files().list(
                     q=files_query,
-                    fields="nextPageToken, files(id,size)",
+                    fields="nextPageToken, files(id,name,size,mimeType,parents)",  # Added name, mimeType, parents for debugging
                     pageSize=1000,
                     supportsAllDrives=True,
                     includeItemsFromAllDrives=True,
@@ -577,12 +613,29 @@ class GoogleDriveAccountService:
                 ).execute()
 
                 files = files_result.get('files', [])
-                files_count += len(files)
-                storage_used += sum(int(f.get('size', 0)) for f in files)
+                page_files_count = len(files)
+                page_storage_used = sum(int(f.get('size', 0)) for f in files)
+                
+                print(f"🔍 [API_DEBUG] {account.account_id}: Page {page_num}: {page_files_count} files, {page_storage_used} bytes")
+                
+                # Debug: Show first few files from each page
+                for i, file in enumerate(files[:5]):  # Show first 5 files from each page
+                    print(f"🔍 [API_DEBUG] {account.account_id}: File {i+1}: {file.get('name', 'Unknown')} ({file.get('size', 0)} bytes, {file.get('mimeType', 'Unknown type')})")
+                
+                if page_files_count > 5:
+                    print(f"🔍 [API_DEBUG] {account.account_id}: ... and {page_files_count - 5} more files on this page")
+                
+                files_count += page_files_count
+                storage_used += page_storage_used
 
                 next_page_token = files_result.get('nextPageToken')
                 if not next_page_token:
+                    print(f"🔍 [API_DEBUG] {account.account_id}: No more pages, stopping pagination")
                     break
+                
+                page_num += 1
+            
+            print(f"🔍 [API_DEBUG] {account.account_id}: FINAL TOTALS: {files_count} files, {storage_used} bytes across {page_num} pages")
             
             # Use folder-level usage for clarity and controllability
             effective_storage_used = storage_used
