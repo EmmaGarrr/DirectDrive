@@ -51,11 +51,19 @@ async def get_system_health(
             "active_sessions": 0  # TODO: Implement session tracking
         }
         
-        # Calculate database size
-        db_size = 0
+        # Calculate actual user file storage size (excluding deleted files)
+        file_storage_pipeline = [
+            {"$match": {"deleted_at": {"$exists": False}}},
+            {"$group": {"_id": None, "total_size": {"$sum": "$size_bytes"}}}
+        ]
+        file_storage_result = list(db.files.aggregate(file_storage_pipeline))
+        user_file_storage = file_storage_result[0]["total_size"] if file_storage_result else 0
+        
+        # Calculate database metadata size
+        db_metadata_size = 0
         try:
             stats = db.command("dbstats")
-            db_size = stats.get("dataSize", 0)
+            db_metadata_size = stats.get("dataSize", 0)
         except Exception:
             pass
         
@@ -101,7 +109,8 @@ async def get_system_health(
             },
             "database": {
                 **db_stats,
-                "size_bytes": db_size
+                "size_bytes": user_file_storage,  # User file storage, not DB metadata
+                "metadata_size_bytes": db_metadata_size  # Separate DB metadata size
             }
         }
         

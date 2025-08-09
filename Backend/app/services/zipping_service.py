@@ -24,10 +24,17 @@ async def stream_file_content(file_doc: dict) -> AsyncGenerator[bytes, None]:
     try:
         if storage_location == "gdrive":
             gdrive_id = file_doc.get("gdrive_id")
+            account_id = file_doc.get("gdrive_account_id")
             if not gdrive_id:
                 raise FileFetchError(f"File {file_id} is in GDrive but ID is missing.")
-            
-            async for chunk in google_drive_service.async_stream_gdrive_file(gdrive_id):
+            if not account_id:
+                raise FileFetchError(f"File {file_id} has no associated Google Drive account ID.")
+
+            account = google_drive_service.gdrive_pool_manager.get_account_by_id(account_id)
+            if not account:
+                raise FileFetchError(f"Google Drive account {account_id} not found for file {file_id}.")
+
+            async for chunk in google_drive_service.async_stream_gdrive_file(gdrive_id, account):
                 yield chunk
 
         # elif storage_location == "telegram":

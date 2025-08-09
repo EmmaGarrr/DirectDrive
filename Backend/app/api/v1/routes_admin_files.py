@@ -435,6 +435,11 @@ async def get_file_type_analytics(
     
     pipeline = [
         {
+            "$match": {
+                "deleted_at": {"$exists": False}  # Exclude deleted files
+            }
+        },
+        {
             "$group": {
                 "_id": {
                     "$cond": {
