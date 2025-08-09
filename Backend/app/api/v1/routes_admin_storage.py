@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
 import json
 
@@ -92,7 +92,8 @@ async def list_google_drive_accounts(
             "folder_name": acc.folder_name or "Root",
             "folder_path": acc.folder_path or "/",
         }
-        response_data["last_quota_check"] = acc.last_quota_check.isoformat() if acc.last_quota_check else None
+        # Fix: Ensure timezone-aware timestamp to prevent frontend parsing issues
+        response_data["last_quota_check"] = acc.last_quota_check.replace(tzinfo=timezone.utc).isoformat() if acc.last_quota_check else None
         # Fix: Use total_seconds() instead of .seconds to get the full time difference  
         current_time = datetime.utcnow()
         if acc.last_quota_check:
@@ -101,6 +102,7 @@ async def list_google_drive_accounts(
             print(f"🔄 [LIST_ACCOUNTS] Account {acc.account_id}: current_time={current_time}, last_quota_check={acc.last_quota_check}, time_diff={time_diff:.1f}s, freshness={response_data['data_freshness']}")
             print(f"🔄 [LIST_ACCOUNTS] Account {acc.account_id}: files_count={acc.files_count}, storage_used={acc.storage_used}")
             print(f"🚀 [API_RESPONSE] Account {acc.account_id}: Sending to frontend - last_quota_check={response_data['last_quota_check']}, data_freshness={response_data['data_freshness']}")
+            print(f"🚀 [TIMEZONE_FIX] Account {acc.account_id}: UTC timestamp with timezone: {response_data['last_quota_check']}")
         else:
             response_data["data_freshness"] = "stale"
             print(f"🔄 [LIST_ACCOUNTS] Account {acc.account_id}: NO last_quota_check timestamp!")
