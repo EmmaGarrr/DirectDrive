@@ -339,25 +339,46 @@ async def delete_file(
     gdrive_id = file_doc.get("gdrive_id")
     gdrive_account_id = file_doc.get("gdrive_account_id")
     
+    print(f"[DELETE_FILE] File details - ID: {file_id}, GDrive ID: {gdrive_id}, Account: {gdrive_account_id}")
+    
     if gdrive_id and gdrive_account_id:
         try:
             from app.services.google_drive_account_service import GoogleDriveAccountService
             from app.services.google_drive_service import delete_gdrive_file
             
             # Get the account configuration
+            print(f"[DELETE_FILE] Looking up Google Drive account: {gdrive_account_id}")
             account = await GoogleDriveAccountService.get_account_by_id(gdrive_account_id)
+            
             if account:
+                print(f"[DELETE_FILE] Found account {account.account_id}, attempting to delete file {gdrive_id}")
                 # Delete from Google Drive
                 success = await delete_gdrive_file(gdrive_id, account.to_config())
                 if success:
-                    print(f"[DELETE_FILE] Successfully deleted {filename} from Google Drive account {gdrive_account_id}")
+                    print(f"[DELETE_FILE] ✅ Successfully deleted {filename} from Google Drive account {gdrive_account_id}")
+                    
+                    # CRITICAL: Force account stats refresh from Google Drive API to reflect real deletion
+                    try:
+                        await GoogleDriveAccountService._update_account_quota(account)
+                        print(f"[DELETE_FILE] ✅ Refreshed account stats from Google Drive API for {gdrive_account_id}")
+                    except Exception as stats_error:
+                        print(f"[DELETE_FILE] Warning: Failed to refresh account stats: {stats_error}")
+                        
                 else:
-                    print(f"[DELETE_FILE] File {filename} not found in Google Drive (may have been manually deleted)")
+                    print(f"[DELETE_FILE] ⚠️  File {filename} not found in Google Drive (may have been manually deleted)")
             else:
-                deletion_errors.append(f"Google Drive account {gdrive_account_id} not found")
+                error_msg = f"Google Drive account {gdrive_account_id} not found in database"
+                print(f"[DELETE_FILE] ❌ {error_msg}")
+                deletion_errors.append(error_msg)
         except Exception as e:
-            print(f"[DELETE_FILE] Error deleting from Google Drive: {e}")
-            deletion_errors.append(f"Google Drive deletion failed: {str(e)}")
+            error_msg = f"Google Drive deletion failed: {str(e)}"
+            print(f"[DELETE_FILE] ❌ Error deleting from Google Drive: {e}")
+            deletion_errors.append(error_msg)
+    else:
+        if not gdrive_id:
+            print(f"[DELETE_FILE] ⚠️  No gdrive_id found for file {file_id}, skipping Google Drive deletion")
+        if not gdrive_account_id:
+            print(f"[DELETE_FILE] ⚠️  No gdrive_account_id found for file {file_id}, skipping Google Drive deletion")
     
     # 2. Delete from Hetzner if present  
     hetzner_path = file_doc.get("hetzner_path")
@@ -385,15 +406,8 @@ async def delete_file(
     
     db.files.update_one({"_id": file_id}, {"$set": update_doc})
     
-    # 4. Update Google Drive account stats if file was in Google Drive
-    if gdrive_account_id:
-        try:
-            # Use MongoDB-based stats update for immediate consistency
-            await GoogleDriveAccountService.update_account_after_file_operation(gdrive_account_id)
-            print(f"[DELETE_FILE] Updated stats for Google Drive account {gdrive_account_id}")
-        except Exception as e:
-            print(f"[DELETE_FILE] Error updating account stats: {e}")
-            # Don't add to deletion_errors as this is not critical for file deletion
+    # 4. Note: Google Drive account stats are already refreshed above after successful deletion
+    # This ensures stats always reflect the real state of Google Drive, not just MongoDB records
     
     # Log admin activity
     details = f"Deleted file: {filename} (ID: {file_id}). Reason: {reason or 'No reason provided'}"
