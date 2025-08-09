@@ -318,6 +318,12 @@ async def delete_file(
 ):
     """Delete a file (admin only) - Deletes from Google Drive and marks as deleted in database"""
     
+    print(f"🚀 [DELETE_FILE] ===== DELETION REQUEST RECEIVED =====")
+    print(f"🚀 [DELETE_FILE] File ID: {file_id}")
+    print(f"🚀 [DELETE_FILE] Admin: {current_admin.email}")
+    print(f"🚀 [DELETE_FILE] Reason: {reason}")
+    print(f"🚀 [DELETE_FILE] ============================================")
+    
     file_doc = db.files.find_one({"_id": file_id})
     if not file_doc:
         raise HTTPException(
@@ -429,6 +435,50 @@ async def delete_file(
         response["message"] = "File marked as deleted, but some storage operations failed"
     
     return response
+
+@router.post("/files/test-gdrive-connection")
+async def test_google_drive_connection(
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Test Google Drive connection and list files"""
+    try:
+        from app.services.google_drive_account_service import GoogleDriveAccountService
+        
+        # Get all accounts
+        accounts = await GoogleDriveAccountService.get_all_accounts()
+        if not accounts:
+            return {"error": "No Google Drive accounts found"}
+        
+        test_results = []
+        for account in accounts:
+            try:
+                print(f"🧪 [TEST_GDRIVE] Testing account: {account.account_id}")
+                
+                # Try to refresh account quota (this tests API connectivity)
+                await GoogleDriveAccountService._update_account_quota(account)
+                
+                test_results.append({
+                    "account_id": account.account_id,
+                    "email": account.email,
+                    "status": "✅ Connected",
+                    "files_count": account.files_count,
+                    "storage_used": account.storage_used
+                })
+                
+            except Exception as e:
+                test_results.append({
+                    "account_id": account.account_id,
+                    "email": account.email, 
+                    "status": f"❌ Error: {str(e)}",
+                    "files_count": 0,
+                    "storage_used": 0
+                })
+        
+        return {"test_results": test_results}
+        
+    except Exception as e:
+        return {"error": f"Test failed: {str(e)}"}
 
 @router.post("/files/bulk-action")
 async def bulk_file_action(
