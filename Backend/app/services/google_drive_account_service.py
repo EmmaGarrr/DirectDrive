@@ -583,6 +583,7 @@ class GoogleDriveAccountService:
                             supportsAllDrives=True
                         ).execute()
                     except Exception as e:
+                        pass
                 
                 # Test 3: Try alternative queries to see if more files are visible
                 if account.folder_id:
@@ -617,8 +618,10 @@ class GoogleDriveAccountService:
                         current_user = about_result.get('user', {}).get('emailAddress', 'Unknown')
                         
                     except Exception as e:
+                        pass
                         
             except Exception as e:
+                pass
 
             # Paginate through all files to compute accurate totals and counts
             next_page_token = None
@@ -665,10 +668,7 @@ class GoogleDriveAccountService:
                 page_storage_used = sum(int(f.get('size', 0)) for f in files)
                 
                 
-                # Debug: Show first few files from each page
-                for i, file in enumerate(files[:5]):  # Show first 5 files from each page
-                
-                if page_files_count > 5:
+
                 
                 files_count += page_files_count
                 storage_used += page_storage_used
