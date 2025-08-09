@@ -419,6 +419,48 @@ async def reset_all_storage(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Reset failed: {e}")
 
+@router.get("/storage/google-drive/combined-stats")
+async def get_combined_google_drive_stats(
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin),
+):
+    """Get combined Google Drive storage statistics for dashboard"""
+    
+    # Get aggregated statistics from all accounts
+    stats = await GoogleDriveAccountService.get_account_statistics()
+    
+    # Calculate available storage
+    total_quota = stats.get("total_storage_quota", 0)
+    total_used = stats.get("total_storage_used", 0)
+    available_storage = max(0, total_quota - total_used)
+    
+    # Calculate usage percentage
+    usage_percentage = (total_used / total_quota * 100) if total_quota > 0 else 0
+    
+    # Format storage sizes
+    combined_stats = {
+        "total_accounts": stats.get("total_accounts", 0),
+        "active_accounts": stats.get("active_accounts", 0),
+        "total_storage_quota": total_quota,
+        "total_storage_quota_formatted": format_storage_size(total_quota),
+        "total_storage_used": total_used,
+        "total_storage_used_formatted": format_storage_size(total_used),
+        "available_storage": available_storage,
+        "available_storage_formatted": format_storage_size(available_storage),
+        "usage_percentage": round(usage_percentage, 1),
+        "health_status": "good" if usage_percentage < 80 else "warning" if usage_percentage < 95 else "critical"
+    }
+    
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action="view_gdrive_combined_stats",
+        details="Viewed combined Google Drive storage statistics",
+        ip_address=get_client_ip(request),
+        endpoint="/api/v1/admin/storage/google-drive/combined-stats",
+    )
+    
+    return combined_stats
+
 def format_storage_size(bytes_size: int) -> str:
     """Format storage size in human readable format"""
     if bytes_size < 1024:
