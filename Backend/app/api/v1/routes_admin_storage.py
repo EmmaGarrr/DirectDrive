@@ -218,6 +218,103 @@ async def remove_google_drive_account(
 
     return {"message": f"Google Drive account {account_id} removed successfully"}
 
+@router.post("/storage/google-drive/accounts/{account_id}/delete-all-files")
+async def delete_all_files_from_account(
+    account_id: str,
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin),
+):
+    """Delete all files from a specific Google Drive account folder"""
+    
+    try:
+        print(f"🗑️ [DELETE_ALL_FILES] Starting deletion for account: {account_id}")
+        
+        # Get the account
+        account = await GoogleDriveAccountService.get_account_by_id(account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="Google Drive account not found")
+        
+        # Delete all files in the account's folder
+        result = await GoogleDriveAccountService.delete_all_files_in_account_folder(account)
+        
+        # Also soft-delete all related files in MongoDB for this account
+        soft_delete_result = db.files.update_many(
+            {"gdrive_account_id": account_id, "deleted_at": {"$exists": False}},
+            {"$set": {
+                "deleted_at": datetime.utcnow(),
+                "status": "deleted", 
+                "deleted_by": current_admin.email,
+                "deletion_reason": f"bulk_delete_account_{account_id}"
+            }}
+        )
+        
+        print(f"🗑️ [DELETE_ALL_FILES] Account {account_id}: GDrive deleted={result.get('deleted', 0)}, MongoDB soft-deleted={soft_delete_result.modified_count}")
+        
+        await log_admin_activity(
+            admin_email=current_admin.email,
+            action="delete_all_account_files",
+            details=f"Deleted all files from Google Drive account {account_id}. GDrive: {result.get('deleted', 0)} files, MongoDB: {soft_delete_result.modified_count} records",
+            ip_address=get_client_ip(request),
+            endpoint=f"/api/v1/admin/storage/google-drive/accounts/{account_id}/delete-all-files",
+        )
+        
+        return {
+            "message": f"All files deleted from account {account_id}",
+            "gdrive_deleted": result.get("deleted", 0),
+            "gdrive_errors": result.get("errors", 0),
+            "mongodb_soft_deleted": soft_delete_result.modified_count,
+            "details": result
+        }
+        
+    except Exception as e:
+        print(f"🗑️ [DELETE_ALL_FILES] Error for account {account_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete files: {str(e)}")
+
+@router.post("/storage/google-drive/accounts/{account_id}/refresh-stats")
+async def refresh_account_stats(
+    account_id: str,
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin),
+):
+    """Manually refresh stats for a specific Google Drive account"""
+    
+    try:
+        print(f"🔄 [REFRESH_STATS] Refreshing stats for account: {account_id}")
+        
+        # Get the account
+        account = await GoogleDriveAccountService.get_account_by_id(account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="Google Drive account not found")
+        
+        # Force refresh account quota and file counts from Google Drive API
+        await GoogleDriveAccountService._update_account_quota(account)
+        
+        # Get updated account data
+        updated_account = await GoogleDriveAccountService.get_account_by_id(account_id)
+        
+        print(f"🔄 [REFRESH_STATS] Account {account_id} refreshed: {updated_account.files_count} files, {updated_account.storage_used} bytes")
+        
+        await log_admin_activity(
+            admin_email=current_admin.email,
+            action="refresh_account_stats",
+            details=f"Manually refreshed stats for Google Drive account {account_id}",
+            ip_address=get_client_ip(request),
+            endpoint=f"/api/v1/admin/storage/google-drive/accounts/{account_id}/refresh-stats",
+        )
+        
+        return {
+            "message": f"Stats refreshed for account {account_id}",
+            "files_count": updated_account.files_count,
+            "storage_used": updated_account.storage_used,
+            "storage_quota": updated_account.storage_quota,
+            "storage_used_formatted": GoogleDriveAccountService.format_storage_size(updated_account.storage_used),
+            "storage_quota_formatted": GoogleDriveAccountService.format_storage_size(updated_account.storage_quota)
+        }
+        
+    except Exception as e:
+        print(f"🔄 [REFRESH_STATS] Error for account {account_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to refresh stats: {str(e)}")
+
 @router.get("/storage/google-drive/load-balancing")
 async def get_load_balancing_config(
     request: Request,
