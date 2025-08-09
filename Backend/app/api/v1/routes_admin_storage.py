@@ -64,7 +64,9 @@ async def list_google_drive_accounts(
                 if account.is_active:
                     try:
                         print(f"🔄 [LIST_ACCOUNTS] Refreshing account {account.account_id}...")
+                        print(f"🔄 [LIST_ACCOUNTS] BEFORE: {account.account_id}: {account.files_count} files, {account.storage_used} bytes, last_check={account.last_quota_check}")
                         await GoogleDriveAccountService._update_account_quota(account)
+                        print(f"🔄 [LIST_ACCOUNTS] AFTER: {account.account_id}: {account.files_count} files, {account.storage_used} bytes, last_check={account.last_quota_check}")
                         print(f"🔄 [LIST_ACCOUNTS] ✅ Account {account.account_id}: {account.files_count} files, {account.storage_used} bytes")
                     except Exception as e:
                         print(f"🔄 [LIST_ACCOUNTS] ❌ Failed to refresh {account.account_id}: {e}")
@@ -72,6 +74,10 @@ async def list_google_drive_accounts(
             # Re-fetch accounts after refresh
             accounts = await GoogleDriveAccountService.get_all_accounts()
             print(f"🔄 [LIST_ACCOUNTS] All accounts refreshed successfully")
+            print(f"🔄 [LIST_ACCOUNTS] RE-FETCHED ACCOUNTS:")
+            for acc in accounts:
+                if acc.is_active:
+                    print(f"🔄 [LIST_ACCOUNTS] REFETCH: {acc.account_id}: {acc.files_count} files, {acc.storage_used} bytes, last_check={acc.last_quota_check}")
             
         except Exception as e:
             print(f"🔄 [LIST_ACCOUNTS] Error during bulk refresh: {e}")
@@ -87,7 +93,13 @@ async def list_google_drive_accounts(
             "folder_path": acc.folder_path or "/",
         }
         response_data["last_quota_check"] = acc.last_quota_check.isoformat() if acc.last_quota_check else None
-        response_data["data_freshness"] = "fresh" if acc.last_quota_check and (datetime.utcnow() - acc.last_quota_check).seconds < 300 else "stale"
+        # Fix: Use total_seconds() instead of .seconds to get the full time difference
+        if acc.last_quota_check:
+            time_diff = (datetime.utcnow() - acc.last_quota_check).total_seconds()
+            response_data["data_freshness"] = "fresh" if time_diff < 300 else "stale"  # 5 minutes = 300 seconds
+            print(f"🔄 [LIST_ACCOUNTS] Account {acc.account_id}: last_quota_check={acc.last_quota_check}, time_diff={time_diff:.1f}s, freshness={response_data['data_freshness']}")
+        else:
+            response_data["data_freshness"] = "stale"
         
         account_responses.append(response_data)
 

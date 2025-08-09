@@ -608,10 +608,13 @@ class GoogleDriveAccountService:
                 else:
                     update_data["health_status"] = "healthy"
             
-            db.google_drive_accounts.update_one(
+            # Update database
+            update_result = db.google_drive_accounts.update_one(
                 {"account_id": account.account_id},
                 {"$set": update_data}
             )
+            print(f"🔄 [QUOTA_UPDATE] {account.account_id}: DB updated (matched={update_result.matched_count}, modified={update_result.modified_count})")
+            print(f"🔄 [QUOTA_UPDATE] {account.account_id}: New data - files={files_count}, storage={effective_storage_used}, quota={storage_quota_limit}")
             
             # Update the account object
             account.storage_quota = storage_quota_limit
@@ -621,6 +624,7 @@ class GoogleDriveAccountService:
             account.folder_path = folder_path
             account.last_quota_check = datetime.utcnow()
             account.updated_at = datetime.utcnow()
+            print(f"🔄 [QUOTA_UPDATE] {account.account_id}: Account object updated, last_quota_check={account.last_quota_check}")
             
         except Exception as e:
             print(f"Error updating quota for account {account.account_id}: {e}")
