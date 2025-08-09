@@ -565,7 +565,7 @@ class GoogleDriveAccountService:
             print(f"🔍 [API_DEBUG] {account.account_id}: folder_id={account.folder_id}")
             print(f"🔍 [API_DEBUG] {account.account_id}: Using query: {files_query}")
 
-            # First, let's also test a simpler query to compare results
+            # Comprehensive testing to identify why some files might not be visible
             try:
                 # Test 1: Simple query to see total files visible to this account
                 simple_result = service.files().list(
@@ -588,6 +588,45 @@ class GoogleDriveAccountService:
                         print(f"🔍 [API_DEBUG] {account.account_id}: Folder metadata: {folder_metadata}")
                     except Exception as e:
                         print(f"🔍 [API_DEBUG] {account.account_id}: ERROR accessing folder metadata: {e}")
+                
+                # Test 3: Try alternative queries to see if more files are visible
+                if account.folder_id:
+                    try:
+                        # Query 1: Include files shared with me
+                        shared_query = f"('{account.folder_id}' in parents or sharedWithMe) and trashed = false"
+                        shared_result = service.files().list(
+                            q=shared_query,
+                            fields="files(id,name,owners,permissions)",
+                            pageSize=20,
+                            supportsAllDrives=True,
+                            includeItemsFromAllDrives=True,
+                        ).execute()
+                        shared_files = shared_result.get('files', [])
+                        print(f"🔍 [API_DEBUG] {account.account_id}: Shared/accessible files: {len(shared_files)} files")
+                        for i, file in enumerate(shared_files[:10]):  # Show first 10
+                            owners = file.get('owners', [])
+                            owner_emails = [owner.get('emailAddress', 'Unknown') for owner in owners]
+                            print(f"🔍 [API_DEBUG] {account.account_id}: Shared File {i+1}: {file.get('name')} (owners: {owner_emails})")
+                        
+                        # Query 2: Search for all files in and around this folder
+                        broad_query = f"('{account.folder_id}' in parents or parents in '{account.folder_id}') and trashed = false"
+                        broad_result = service.files().list(
+                            q=broad_query,
+                            fields="files(id,name,parents,shared)",
+                            pageSize=20,
+                            supportsAllDrives=True,
+                            includeItemsFromAllDrives=True,
+                        ).execute()
+                        broad_files = broad_result.get('files', [])
+                        print(f"🔍 [API_DEBUG] {account.account_id}: Broad search (including subfolders): {len(broad_files)} files")
+                        
+                        # Query 3: Check if this is a shared drive folder
+                        about_result = service.about().get(fields="user").execute()
+                        current_user = about_result.get('user', {}).get('emailAddress', 'Unknown')
+                        print(f"🔍 [API_DEBUG] {account.account_id}: Current API user: {current_user}")
+                        
+                    except Exception as e:
+                        print(f"🔍 [API_DEBUG] {account.account_id}: ERROR with extended queries: {e}")
                         
             except Exception as e:
                 print(f"🔍 [API_DEBUG] {account.account_id}: ERROR with test queries: {e}")
