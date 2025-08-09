@@ -58,29 +58,18 @@ async def list_google_drive_accounts(
     
     # Force refresh from Google Drive API if requested or if data is stale
     if refresh:
-        print(f"🔄 [LIST_ACCOUNTS] Force refreshing all account stats from Google Drive API...")
         try:
             for account in accounts:
                 if account.is_active:
                     try:
-                        print(f"🔄 [LIST_ACCOUNTS] Refreshing account {account.account_id}...")
-                        print(f"🔄 [LIST_ACCOUNTS] BEFORE: {account.account_id}: {account.files_count} files, {account.storage_used} bytes, last_check={account.last_quota_check}")
                         await GoogleDriveAccountService._update_account_quota(account)
-                        print(f"🔄 [LIST_ACCOUNTS] AFTER: {account.account_id}: {account.files_count} files, {account.storage_used} bytes, last_check={account.last_quota_check}")
-                        print(f"🔄 [LIST_ACCOUNTS] ✅ Account {account.account_id}: {account.files_count} files, {account.storage_used} bytes")
                     except Exception as e:
-                        print(f"🔄 [LIST_ACCOUNTS] ❌ Failed to refresh {account.account_id}: {e}")
+                        print(f"Failed to refresh account {account.account_id}: {e}")
             
             # Re-fetch accounts after refresh
             accounts = await GoogleDriveAccountService.get_all_accounts()
-            print(f"🔄 [LIST_ACCOUNTS] All accounts refreshed successfully")
-            print(f"🔄 [LIST_ACCOUNTS] RE-FETCHED ACCOUNTS:")
-            for acc in accounts:
-                if acc.is_active:
-                    print(f"🔄 [LIST_ACCOUNTS] REFETCH: {acc.account_id}: {acc.files_count} files, {acc.storage_used} bytes, last_check={acc.last_quota_check}")
-            
         except Exception as e:
-            print(f"🔄 [LIST_ACCOUNTS] Error during bulk refresh: {e}")
+            print(f"Error during bulk refresh: {e}")
 
     account_responses = []
     for acc in accounts:
@@ -99,14 +88,8 @@ async def list_google_drive_accounts(
         if acc.last_quota_check:
             time_diff = (current_time - acc.last_quota_check).total_seconds()
             response_data["data_freshness"] = "fresh" if time_diff < 300 else "stale"  # 5 minutes = 300 seconds
-            print(f"🔄 [LIST_ACCOUNTS] Account {acc.account_id}: current_time={current_time}, last_quota_check={acc.last_quota_check}, time_diff={time_diff:.1f}s, freshness={response_data['data_freshness']}")
-            print(f"🔄 [LIST_ACCOUNTS] Account {acc.account_id}: files_count={acc.files_count}, storage_used={acc.storage_used}")
-            print(f"🚀 [API_RESPONSE] Account {acc.account_id}: Sending to frontend - last_quota_check={response_data['last_quota_check']}, data_freshness={response_data['data_freshness']}")
-            print(f"🚀 [TIMEZONE_FIX] Account {acc.account_id}: UTC timestamp with timezone: {response_data['last_quota_check']}")
         else:
             response_data["data_freshness"] = "stale"
-            print(f"🔄 [LIST_ACCOUNTS] Account {acc.account_id}: NO last_quota_check timestamp!")
-            print(f"🚀 [API_RESPONSE] Account {acc.account_id}: Sending to frontend - last_quota_check=None, data_freshness=stale")
         
         account_responses.append(response_data)
 

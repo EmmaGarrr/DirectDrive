@@ -557,16 +557,11 @@ class GoogleDriveAccountService:
                 except Exception as e:
                     print(f"Error fetching folder info for account {account.account_id}: {e}")
             
-            # Get files count and total size - FIXED to include shared files from other owners
+            # Get files count and total size - include shared files from other owners
             files_query = "trashed = false"
             if account.folder_id:
-                # ENHANCED: Use the same successful query from our debugging (shared query)
-                # This matches exactly what showed 20 files in the debug logs
+                # Use enhanced query to include shared files accessible to this account
                 files_query = f"('{account.folder_id}' in parents or sharedWithMe) and trashed = false"
-                print(f"🔧 [FIX] {account.account_id}: Using ENHANCED query to include ALL shared files accessible to this account")
-                
-            print(f"🔍 [API_DEBUG] {account.account_id}: folder_id={account.folder_id}")
-            print(f"🔍 [API_DEBUG] {account.account_id}: Using query: {files_query}")
 
             # Comprehensive testing to identify why some files might not be visible
             try:
@@ -578,7 +573,6 @@ class GoogleDriveAccountService:
                     supportsAllDrives=True,
                     includeItemsFromAllDrives=True,
                 ).execute()
-                print(f"🔍 [API_DEBUG] {account.account_id}: Can access {len(simple_result.get('files', []))} files with simple query (testing auth)")
                 
                 # Test 2: Check if folder exists and get its metadata
                 if account.folder_id:
@@ -588,9 +582,7 @@ class GoogleDriveAccountService:
                             fields="id,name,permissions,parents,shared,owners",
                             supportsAllDrives=True
                         ).execute()
-                        print(f"🔍 [API_DEBUG] {account.account_id}: Folder metadata: {folder_metadata}")
                     except Exception as e:
-                        print(f"🔍 [API_DEBUG] {account.account_id}: ERROR accessing folder metadata: {e}")
                 
                 # Test 3: Try alternative queries to see if more files are visible
                 if account.folder_id:
@@ -605,11 +597,9 @@ class GoogleDriveAccountService:
                             includeItemsFromAllDrives=True,
                         ).execute()
                         shared_files = shared_result.get('files', [])
-                        print(f"🔍 [API_DEBUG] {account.account_id}: Shared/accessible files: {len(shared_files)} files")
                         for i, file in enumerate(shared_files[:10]):  # Show first 10
                             owners = file.get('owners', [])
                             owner_emails = [owner.get('emailAddress', 'Unknown') for owner in owners]
-                            print(f"🔍 [API_DEBUG] {account.account_id}: Shared File {i+1}: {file.get('name')} (owners: {owner_emails})")
                         
                         # Query 2: Search for all files in and around this folder
                         broad_query = f"('{account.folder_id}' in parents or parents in '{account.folder_id}') and trashed = false"
@@ -621,18 +611,14 @@ class GoogleDriveAccountService:
                             includeItemsFromAllDrives=True,
                         ).execute()
                         broad_files = broad_result.get('files', [])
-                        print(f"🔍 [API_DEBUG] {account.account_id}: Broad search (including subfolders): {len(broad_files)} files")
                         
                         # Query 3: Check if this is a shared drive folder
                         about_result = service.about().get(fields="user").execute()
                         current_user = about_result.get('user', {}).get('emailAddress', 'Unknown')
-                        print(f"🔍 [API_DEBUG] {account.account_id}: Current API user: {current_user}")
                         
                     except Exception as e:
-                        print(f"🔍 [API_DEBUG] {account.account_id}: ERROR with extended queries: {e}")
                         
             except Exception as e:
-                print(f"🔍 [API_DEBUG] {account.account_id}: ERROR with test queries: {e}")
 
             # Paginate through all files to compute accurate totals and counts
             next_page_token = None
@@ -640,10 +626,8 @@ class GoogleDriveAccountService:
             storage_used = 0
             page_num = 1
             
-            print(f"🔍 [API_DEBUG] {account.account_id}: Starting file enumeration with query: {files_query}")
             
             while True:
-                print(f"🔍 [API_DEBUG] {account.account_id}: Fetching page {page_num} (pageToken: {next_page_token or 'None'})")
                 
                 files_result = service.files().list(
                     q=files_query,
@@ -667,8 +651,6 @@ class GoogleDriveAccountService:
                             filtered_files.append(file)
                     
                     # Debug: Show what we're filtering
-                    print(f"🔧 [FIX] {account.account_id}: Found {len(files_result.get('files', []))} total accessible files")
-                    print(f"🔧 [FIX] {account.account_id}: Filtered to {len(filtered_files)} files actually in target folder '{account.folder_id}'")
                     
                     # Show some filtered-out files for debugging
                     all_files = files_result.get('files', [])
@@ -682,26 +664,21 @@ class GoogleDriveAccountService:
                 page_files_count = len(files)
                 page_storage_used = sum(int(f.get('size', 0)) for f in files)
                 
-                print(f"🔍 [API_DEBUG] {account.account_id}: Page {page_num}: {page_files_count} files, {page_storage_used} bytes")
                 
                 # Debug: Show first few files from each page
                 for i, file in enumerate(files[:5]):  # Show first 5 files from each page
-                    print(f"🔍 [API_DEBUG] {account.account_id}: File {i+1}: {file.get('name', 'Unknown')} ({file.get('size', 0)} bytes, {file.get('mimeType', 'Unknown type')})")
                 
                 if page_files_count > 5:
-                    print(f"🔍 [API_DEBUG] {account.account_id}: ... and {page_files_count - 5} more files on this page")
                 
                 files_count += page_files_count
                 storage_used += page_storage_used
 
                 next_page_token = files_result.get('nextPageToken')
                 if not next_page_token:
-                    print(f"🔍 [API_DEBUG] {account.account_id}: No more pages, stopping pagination")
                     break
                 
                 page_num += 1
             
-            print(f"🔍 [API_DEBUG] {account.account_id}: FINAL TOTALS: {files_count} files, {storage_used} bytes across {page_num} pages")
             
             # Use folder-level usage for clarity and controllability
             effective_storage_used = storage_used
@@ -732,8 +709,6 @@ class GoogleDriveAccountService:
                 {"account_id": account.account_id},
                 {"$set": update_data}
             )
-            print(f"🔄 [QUOTA_UPDATE] {account.account_id}: DB updated (matched={update_result.matched_count}, modified={update_result.modified_count})")
-            print(f"🔄 [QUOTA_UPDATE] {account.account_id}: New data - files={files_count}, storage={effective_storage_used}, quota={storage_quota_limit}")
             
             # Update the account object
             account.storage_quota = storage_quota_limit
@@ -743,7 +718,6 @@ class GoogleDriveAccountService:
             account.folder_path = folder_path
             account.last_quota_check = datetime.utcnow()
             account.updated_at = datetime.utcnow()
-            print(f"🔄 [QUOTA_UPDATE] {account.account_id}: Account object updated, last_quota_check={account.last_quota_check}")
             
         except Exception as e:
             print(f"Error updating quota for account {account.account_id}: {e}")
