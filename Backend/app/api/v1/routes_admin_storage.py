@@ -48,16 +48,48 @@ class AccountCredentials(BaseModel):
 @router.get("/storage/google-drive/accounts")
 async def list_google_drive_accounts(
     request: Request,
+    refresh: bool = Query(False, description="Force refresh from Google Drive API"),
     current_admin: AdminUserInDB = Depends(get_current_admin),
 ):
     """List all Google Drive accounts with their status and usage (real data)."""
 
     # Fetch accounts from DB
     accounts = await GoogleDriveAccountService.get_all_accounts()
-    account_responses = [
-        GoogleDriveAccountService.to_response_model(acc).dict()
-        for acc in accounts
-    ]
+    
+    # Force refresh from Google Drive API if requested or if data is stale
+    if refresh:
+        print(f"🔄 [LIST_ACCOUNTS] Force refreshing all account stats from Google Drive API...")
+        try:
+            for account in accounts:
+                if account.is_active:
+                    try:
+                        print(f"🔄 [LIST_ACCOUNTS] Refreshing account {account.account_id}...")
+                        await GoogleDriveAccountService._update_account_quota(account)
+                        print(f"🔄 [LIST_ACCOUNTS] ✅ Account {account.account_id}: {account.files_count} files, {account.storage_used} bytes")
+                    except Exception as e:
+                        print(f"🔄 [LIST_ACCOUNTS] ❌ Failed to refresh {account.account_id}: {e}")
+            
+            # Re-fetch accounts after refresh
+            accounts = await GoogleDriveAccountService.get_all_accounts()
+            print(f"🔄 [LIST_ACCOUNTS] All accounts refreshed successfully")
+            
+        except Exception as e:
+            print(f"🔄 [LIST_ACCOUNTS] Error during bulk refresh: {e}")
+
+    account_responses = []
+    for acc in accounts:
+        response_data = GoogleDriveAccountService.to_response_model(acc).dict()
+        
+        # Add folder information and freshness indicator
+        response_data["folder_info"] = {
+            "folder_id": acc.folder_id,
+            "folder_name": acc.folder_name or "Root",
+            "folder_path": acc.folder_path or "/",
+        }
+        response_data["last_quota_check"] = acc.last_quota_check.isoformat() if acc.last_quota_check else None
+        response_data["data_freshness"] = "fresh" if acc.last_quota_check and (datetime.utcnow() - acc.last_quota_check).seconds < 300 else "stale"
+        
+        account_responses.append(response_data)
 
     # Aggregated statistics
     stats = await GoogleDriveAccountService.get_account_statistics()
@@ -72,7 +104,7 @@ async def list_google_drive_accounts(
     await log_admin_activity(
         admin_email=current_admin.email,
         action="view_gdrive_accounts",
-        details="Viewed Google Drive accounts list",
+        details=f"Viewed Google Drive accounts list (refresh={refresh})",
         ip_address=get_client_ip(request),
         endpoint="/api/v1/admin/storage/google-drive/accounts",
     )
