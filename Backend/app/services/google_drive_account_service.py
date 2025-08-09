@@ -557,10 +557,13 @@ class GoogleDriveAccountService:
                 except Exception as e:
                     print(f"Error fetching folder info for account {account.account_id}: {e}")
             
-            # Get files count and total size
+            # Get files count and total size - FIXED to include shared files from other owners
             files_query = "trashed = false"
             if account.folder_id:
-                files_query = f"'{account.folder_id}' in parents and trashed = false"
+                # ENHANCED: Use the same successful query from our debugging (shared query)
+                # This matches exactly what showed 20 files in the debug logs
+                files_query = f"('{account.folder_id}' in parents or sharedWithMe) and trashed = false"
+                print(f"🔧 [FIX] {account.account_id}: Using ENHANCED query to include ALL shared files accessible to this account")
                 
             print(f"🔍 [API_DEBUG] {account.account_id}: folder_id={account.folder_id}")
             print(f"🔍 [API_DEBUG] {account.account_id}: Using query: {files_query}")
@@ -652,6 +655,18 @@ class GoogleDriveAccountService:
                 ).execute()
 
                 files = files_result.get('files', [])
+                
+                # ENHANCED: Filter files to only include those actually in the target folder
+                # This prevents counting shared files from other folders
+                if account.folder_id:
+                    filtered_files = []
+                    for file in files:
+                        file_parents = file.get('parents', [])
+                        if account.folder_id in file_parents:
+                            filtered_files.append(file)
+                    files = filtered_files
+                    print(f"🔧 [FIX] {account.account_id}: Filtered {len(files_result.get('files', []))} total files to {len(files)} files actually in target folder")
+                
                 page_files_count = len(files)
                 page_storage_used = sum(int(f.get('size', 0)) for f in files)
                 
