@@ -197,3 +197,35 @@ async def async_stream_gdrive_file(gdrive_id: str, account: GoogleAccountConfig)
         print(f"!!! [{account.id}] Google API error during stream: {e.content}"); raise e
     except Exception as e:
         print(f"!!! [{account.id}] Unexpected error during Google Drive stream: {e}"); raise e
+
+async def delete_gdrive_file(gdrive_id: str, account: GoogleAccountConfig) -> bool:
+    """
+    Delete a file from Google Drive using the API.
+    Returns True if successful, False if file not found, raises exception for other errors.
+    """
+    try:
+        gdrive_pool_manager.tracker.increment_request_count(account.id)
+        service = _get_gdrive_service(account)
+        
+        # Use asyncio.to_thread to run the blocking API call
+        def execute_delete():
+            return service.files().delete(
+                fileId=gdrive_id,
+                supportsAllDrives=True
+            ).execute()
+        
+        await asyncio.to_thread(execute_delete)
+        
+        print(f"[DELETE_GDRIVE] [{account.id}] Successfully deleted file {gdrive_id}")
+        return True
+        
+    except HttpError as e:
+        if e.resp.status == 404:
+            print(f"[DELETE_GDRIVE] [{account.id}] File {gdrive_id} not found (404) - already deleted")
+            return False
+        else:
+            print(f"!!! [{account.id}] Google API error during delete: {e.content}")
+            raise e
+    except Exception as e:
+        print(f"!!! [{account.id}] Unexpected error during Google Drive delete: {e}")
+        raise e

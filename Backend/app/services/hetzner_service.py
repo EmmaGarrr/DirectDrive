@@ -98,3 +98,43 @@ async def transfer_gdrive_to_hetzner(file_id: str):
         print(f"!!! [HETZNER_BACKUP] An exception occurred for file_id {file_id}. Reason: {e}")
         traceback.print_exc()
         db.files.update_one({"_id": file_id}, {"$set": {"backup_status": BackupStatus.FAILED}})
+
+class HetznerService:
+    """Service for managing Hetzner Storage Box operations"""
+    
+    async def delete_file(self, remote_path: str) -> bool:
+        """
+        Delete a file from Hetzner Storage Box using WebDAV
+        Returns True if successful, False if file not found, raises exception for other errors.
+        """
+        if not all([settings.HETZNER_WEBDAV_URL, settings.HETZNER_USERNAME, settings.HETZNER_PASSWORD]):
+            raise Exception("Hetzner credentials not configured")
+        
+        try:
+            auth = httpx.BasicAuth(settings.HETZNER_USERNAME, settings.HETZNER_PASSWORD)
+            file_url = f"{settings.HETZNER_WEBDAV_URL}/{remote_path}"
+            
+            timeout_config = httpx.Timeout(30.0)
+            async with httpx.AsyncClient(auth=auth, timeout=timeout_config) as client:
+                response = await client.delete(file_url)
+                
+                if response.status_code == 204:
+                    print(f"[HETZNER_DELETE] Successfully deleted file: {remote_path}")
+                    return True
+                elif response.status_code == 404:
+                    print(f"[HETZNER_DELETE] File not found: {remote_path} (404) - already deleted")
+                    return False
+                else:
+                    response.raise_for_status()
+                    return True
+                    
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                print(f"[HETZNER_DELETE] File not found: {remote_path} - already deleted")
+                return False
+            else:
+                print(f"!!! [HETZNER_DELETE] HTTP error deleting file {remote_path}: {e}")
+                raise e
+        except Exception as e:
+            print(f"!!! [HETZNER_DELETE] Unexpected error deleting file {remote_path}: {e}")
+            raise e

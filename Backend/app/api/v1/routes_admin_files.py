@@ -316,7 +316,7 @@ async def delete_file(
     reason: Optional[str] = Query(None),
     current_admin: AdminUserInDB = Depends(get_current_admin)
 ):
-    """Delete a file (admin only)"""
+    """Delete a file (admin only) - Deletes from Google Drive and marks as deleted in database"""
     
     file_doc = db.files.find_one({"_id": file_id})
     if not file_doc:
@@ -325,27 +325,97 @@ async def delete_file(
             detail="File not found"
         )
     
-    # TODO: Implement actual file deletion from Google Drive/Hetzner
-    # For now, mark as deleted in database
+    # Check if file is already deleted
+    if file_doc.get("deleted_at") or file_doc.get("status") == "deleted":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File is already deleted"
+        )
+    
+    deletion_errors = []
+    filename = file_doc.get("filename", "Unknown")
+    
+    # 1. Delete from Google Drive if present
+    gdrive_id = file_doc.get("gdrive_id")
+    gdrive_account_id = file_doc.get("gdrive_account_id")
+    
+    if gdrive_id and gdrive_account_id:
+        try:
+            from app.services.google_drive_account_service import GoogleDriveAccountService
+            from app.services.google_drive_service import delete_gdrive_file
+            
+            # Get the account configuration
+            account = await GoogleDriveAccountService.get_account_by_id(gdrive_account_id)
+            if account:
+                # Delete from Google Drive
+                success = await delete_gdrive_file(gdrive_id, account.to_config())
+                if success:
+                    print(f"[DELETE_FILE] Successfully deleted {filename} from Google Drive account {gdrive_account_id}")
+                else:
+                    print(f"[DELETE_FILE] File {filename} not found in Google Drive (may have been manually deleted)")
+            else:
+                deletion_errors.append(f"Google Drive account {gdrive_account_id} not found")
+        except Exception as e:
+            print(f"[DELETE_FILE] Error deleting from Google Drive: {e}")
+            deletion_errors.append(f"Google Drive deletion failed: {str(e)}")
+    
+    # 2. Delete from Hetzner if present  
+    hetzner_path = file_doc.get("hetzner_path")
+    if hetzner_path:
+        try:
+            from app.services.hetzner_service import HetznerService
+            hetzner_service = HetznerService()
+            success = await hetzner_service.delete_file(hetzner_path)
+            if success:
+                print(f"[DELETE_FILE] Successfully deleted {filename} from Hetzner")
+            else:
+                deletion_errors.append("Hetzner deletion failed")
+        except Exception as e:
+            print(f"[DELETE_FILE] Error deleting from Hetzner: {e}")
+            deletion_errors.append(f"Hetzner deletion failed: {str(e)}")
+    
+    # 3. Mark as deleted in database (always do this, even if storage deletion fails)
     update_doc = {
         "status": "deleted",
         "deleted_at": datetime.utcnow(),
         "deleted_by": current_admin.email,
-        "deletion_reason": reason
+        "deletion_reason": reason,
+        "deletion_errors": deletion_errors if deletion_errors else None
     }
     
     db.files.update_one({"_id": file_id}, {"$set": update_doc})
     
+    # 4. Update Google Drive account stats if file was in Google Drive
+    if gdrive_account_id and not deletion_errors:
+        try:
+            account = await GoogleDriveAccountService.get_account_by_id(gdrive_account_id)
+            if account:
+                await GoogleDriveAccountService._update_account_quota(account)
+                print(f"[DELETE_FILE] Updated stats for Google Drive account {gdrive_account_id}")
+        except Exception as e:
+            print(f"[DELETE_FILE] Error updating account stats: {e}")
+            # Don't add to deletion_errors as this is not critical for file deletion
+    
     # Log admin activity
+    details = f"Deleted file: {filename} (ID: {file_id}). Reason: {reason or 'No reason provided'}"
+    if deletion_errors:
+        details += f". Errors: {'; '.join(deletion_errors)}"
+    
     await log_admin_activity(
         admin_email=current_admin.email,
         action="delete_file",
-        details=f"Deleted file: {file_doc.get('filename', 'Unknown')} (ID: {file_id}). Reason: {reason or 'No reason provided'}",
+        details=details,
         ip_address=get_client_ip(request),
         endpoint=f"/api/v1/admin/files/{file_id}"
     )
     
-    return {"message": "File deleted successfully"}
+    # Return response with any errors
+    response = {"message": "File deleted successfully"}
+    if deletion_errors:
+        response["warnings"] = deletion_errors
+        response["message"] = "File marked as deleted, but some storage operations failed"
+    
+    return response
 
 @router.post("/files/bulk-action")
 async def bulk_file_action(
