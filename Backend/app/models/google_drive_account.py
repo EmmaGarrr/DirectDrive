@@ -47,6 +47,22 @@ class GoogleDriveAccountDB(BaseModel):
             ]
         }
     }
+    
+    def to_config(self):
+        """Convert to GoogleAccountConfig for use with Google Drive service"""
+        from app.core.config import GoogleAccountConfig
+        
+        # Ensure we have OAuth credentials
+        if not all([self.client_id, self.client_secret, self.refresh_token]):
+            raise ValueError(f"Account {self.account_id} missing OAuth credentials for Google Drive API")
+        
+        return GoogleAccountConfig(
+            id=self.account_id,
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            refresh_token=self.refresh_token,
+            folder_id=self.folder_id
+        )
 
 class GoogleDriveAccountCreate(BaseModel):
     """Model for creating new Google Drive accounts"""
