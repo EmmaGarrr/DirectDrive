@@ -107,10 +107,10 @@ async def list_google_drive_accounts(
             local_quota_check = acc.last_quota_check.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
             response_data["last_quota_check"] = local_quota_check.isoformat()
             
-            # Calculate data freshness using local time
+            # Calculate data freshness using local time - use same threshold as header cache (15 minutes)
             current_time = datetime.now()
             time_diff = (current_time - local_quota_check).total_seconds()
-            response_data["data_freshness"] = "fresh" if time_diff < 300 else "stale"  # 5 minutes = 300 seconds
+            response_data["data_freshness"] = "fresh" if time_diff < 900 else "stale"  # 15 minutes = 900 seconds (same as cache_expiry_seconds)
         else:
             response_data["last_quota_check"] = None
             response_data["data_freshness"] = "stale"
