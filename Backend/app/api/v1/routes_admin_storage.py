@@ -51,13 +51,29 @@ async def list_google_drive_accounts(
     refresh: bool = Query(False, description="Force refresh from Google Drive API"),
     current_admin: AdminUserInDB = Depends(get_current_admin),
 ):
-    """List all Google Drive accounts with their status and usage (real data)."""
+    """List all Google Drive accounts with their status and usage (smart cached data)."""
 
     # Fetch accounts from DB
     accounts = await GoogleDriveAccountService.get_all_accounts()
     
-    # Force refresh from Google Drive API if requested or if data is stale
-    if refresh:
+    # Smart caching logic: Only refresh if explicitly requested or if data is very stale (>15 minutes)
+    cache_expiry_seconds = 900  # 15 minutes
+    needs_refresh = refresh
+    cache_status = "fresh"
+    
+    if not refresh:
+        # Check if any account data is stale
+        current_time = datetime.now()
+        for account in accounts:
+            if account.last_quota_check:
+                time_diff = (current_time - account.last_quota_check).total_seconds()
+                if time_diff > cache_expiry_seconds:
+                    needs_refresh = True
+                    cache_status = "stale"
+                    break
+    
+    # Perform refresh if needed
+    if needs_refresh:
         try:
             for account in accounts:
                 if account.is_active:
@@ -68,8 +84,10 @@ async def list_google_drive_accounts(
             
             # Re-fetch accounts after refresh
             accounts = await GoogleDriveAccountService.get_all_accounts()
+            cache_status = "fresh"
         except Exception as e:
             print(f"Error during bulk refresh: {e}")
+            cache_status = "error"
 
     account_responses = []
     for acc in accounts:
@@ -84,7 +102,7 @@ async def list_google_drive_accounts(
         # Fix: Ensure timezone-aware timestamp to prevent frontend parsing issues
         response_data["last_quota_check"] = acc.last_quota_check.replace(tzinfo=timezone.utc).isoformat() if acc.last_quota_check else None
         # Fix: Use total_seconds() instead of .seconds to get the full time difference  
-        current_time = datetime.utcnow()
+        current_time = datetime.now()
         if acc.last_quota_check:
             time_diff = (current_time - acc.last_quota_check).total_seconds()
             response_data["data_freshness"] = "fresh" if time_diff < 300 else "stale"  # 5 minutes = 300 seconds
@@ -106,12 +124,21 @@ async def list_google_drive_accounts(
     await log_admin_activity(
         admin_email=current_admin.email,
         action="view_gdrive_accounts",
-        details=f"Viewed Google Drive accounts list (refresh={refresh})",
+        details=f"Viewed Google Drive accounts list (refresh={refresh}, cache_status={cache_status})",
         ip_address=get_client_ip(request),
         endpoint="/api/v1/admin/storage/google-drive/accounts",
     )
 
-    return {"accounts": account_responses, "statistics": statistics}
+    return {
+        "accounts": account_responses, 
+        "statistics": statistics,
+        "cache_info": {
+            "status": cache_status,
+            "last_updated": datetime.now().isoformat(),
+            "cache_expiry_seconds": cache_expiry_seconds,
+            "is_forced_refresh": refresh
+        }
+    }
 
 @router.get("/storage/google-drive/accounts/{account_id}")
 async def get_google_drive_account_detail(
