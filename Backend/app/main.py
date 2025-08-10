@@ -15,6 +15,8 @@ from app.core.config import settings
 from app.services import backup_service
 from app.services.google_drive_account_service import GoogleDriveAccountService
 from app.services.google_drive_service import gdrive_pool_manager
+# Priority queue middleware
+from app.middleware.priority_middleware import PriorityMiddleware
 
 # Strict concurrency limiter for server stability
 BACKUP_TASK_SEMAPHORE = asyncio.Semaphore(1)
@@ -72,6 +74,9 @@ class ConnectionManager:
 manager = ConnectionManager()
 app = FastAPI(title="File Transfer Service")
 origins = ["http://localhost:4200", "http://135.148.33.247", "https://teletransfer.vercel.app", "https://*.vercel.app"]
+
+# Add priority middleware first (before CORS)
+app.add_middleware(PriorityMiddleware)
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- Startup hooks for storage account health and pool sync ---
