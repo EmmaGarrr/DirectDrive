@@ -1,13 +1,23 @@
-from fastapi import APIRouter, Depends, Request, Query
+from fastapi import APIRouter, Depends, Request, Query, HTTPException, status
 from datetime import datetime, timedelta
 import psutil
 import os
 import asyncio
+import time
+import logging
+from typing import Dict, Any, List
 from app.services.admin_auth_service import get_current_admin, get_current_superadmin, log_admin_activity, get_client_ip
 from app.models.admin import AdminUserInDB
 from app.db.mongodb import db
 from app.core.config import settings
-import time
+from app.services.background_process_manager import (
+    background_process_manager, 
+    ProcessType, 
+    ProcessPriority, 
+    ProcessStatus
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -42,20 +52,28 @@ async def get_system_health(
         boot_time = psutil.boot_time()
         uptime = time.time() - boot_time
         
-        # Database Stats
+        # Database Stats (excluding deleted files)
         db_stats = {
             "total_collections": len(db.list_collection_names()),
-            "total_files": db.files.count_documents({}),
+            "total_files": db.files.count_documents({"deleted_at": {"$exists": False}}),  # Exclude deleted files
             "total_users": db.users.count_documents({}),
             "total_admins": db.users.count_documents({"role": {"$in": ["admin", "superadmin"]}}),
             "active_sessions": 0  # TODO: Implement session tracking
         }
         
-        # Calculate database size
-        db_size = 0
+        # Calculate actual user file storage size (excluding deleted files)
+        file_storage_pipeline = [
+            {"$match": {"deleted_at": {"$exists": False}}},
+            {"$group": {"_id": None, "total_size": {"$sum": "$size_bytes"}}}
+        ]
+        file_storage_result = list(db.files.aggregate(file_storage_pipeline))
+        user_file_storage = file_storage_result[0]["total_size"] if file_storage_result else 0
+        
+        # Calculate database metadata size
+        db_metadata_size = 0
         try:
             stats = db.command("dbstats")
-            db_size = stats.get("dataSize", 0)
+            db_metadata_size = stats.get("dataSize", 0)
         except Exception:
             pass
         
@@ -101,7 +119,8 @@ async def get_system_health(
             },
             "database": {
                 **db_stats,
-                "size_bytes": db_size
+                "size_bytes": user_file_storage,  # User file storage, not DB metadata
+                "metadata_size_bytes": db_metadata_size  # Separate DB metadata size
             }
         }
         
@@ -1500,3 +1519,143 @@ async def get_third_party_api_status(
         },
         "external_services": external_services
     }
+
+@router.get("/processes/status", response_model=Dict[str, Any])
+async def get_process_queue_status(current_admin: AdminUserInDB = Depends(get_current_admin)):
+    """Get current background process queue status"""
+    try:
+        queue_status = background_process_manager.get_queue_status()
+        return {
+            "success": True,
+            "queue_status": queue_status,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting process queue status: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get process queue status"
+        )
+
+@router.get("/processes/active", response_model=List[Dict[str, Any]])
+async def get_active_processes(
+    admin_only: bool = Query(False, description="Show only admin-initiated processes"),
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Get currently active background processes"""
+    try:
+        active_processes = background_process_manager.get_active_processes(admin_only=admin_only)
+        return [process.to_dict() for process in active_processes]
+    except Exception as e:
+        logger.error(f"Error getting active processes: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get active processes"
+        )
+
+@router.get("/processes/priority-info", response_model=Dict[str, Any])
+async def get_priority_system_info(current_admin: AdminUserInDB = Depends(get_current_admin)):
+    """Get information about the priority system and how it works"""
+    return {
+        "priority_system": {
+            "description": "Priority-based background process management system",
+            "admin_priority": "Admin operations get priority 1-2 (Critical/High)",
+            "user_priority": "User operations get priority 3-4 (Normal/Low)",
+            "admin_workers": "2 dedicated admin workers for high-priority tasks",
+            "user_workers": "3 user workers for normal operations",
+            "queue_behavior": "Admin workers can help with user tasks when admin queue is empty"
+        },
+        "process_types": {
+            "admin_quota_refresh": "Google Drive account quota updates",
+            "admin_storage_cleanup": "Storage optimization and cleanup",
+            "admin_backup_operation": "Backup and restore operations",
+            "user_file_upload": "File upload processing",
+            "user_file_download": "File download processing",
+            "user_batch_operation": "Batch file operations"
+        },
+        "priority_levels": {
+            "1": "CRITICAL - Admin operations that must complete immediately",
+            "2": "HIGH - Admin operations with high priority",
+            "3": "NORMAL - Regular user operations",
+            "4": "LOW - Background maintenance tasks"
+        }
+    }
+
+@router.get("/processes/{process_id}", response_model=Dict[str, Any])
+async def get_process_details(
+    process_id: str,
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Get details of a specific background process"""
+    try:
+        process = background_process_manager.get_process(process_id)
+        if not process:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Process not found"
+            )
+        return process.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting process details: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get process details"
+        )
+
+@router.post("/processes/{process_id}/cancel", response_model=Dict[str, Any])
+async def cancel_process(
+    process_id: str,
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Cancel a running background process"""
+    try:
+        success = background_process_manager.cancel_process(process_id)
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Process cannot be cancelled or not found"
+            )
+        
+        return {
+            "success": True,
+            "message": f"Process {process_id} cancelled successfully",
+            "process_id": process_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error cancelling process: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to cancel process"
+        )
+
+@router.post("/processes/refresh-quota", response_model=Dict[str, Any])
+async def trigger_quota_refresh(
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Trigger a manual quota refresh for all Google Drive accounts (Admin Priority)"""
+    try:
+        # Add high-priority admin process
+        process_id = background_process_manager.add_process(
+            process_type=ProcessType.ADMIN_QUOTA_REFRESH,
+            priority=ProcessPriority.HIGH,
+            description="Manual quota refresh triggered by admin",
+            admin_initiated=True,
+            metadata={"admin_email": current_admin.email}
+        )
+        
+        return {
+            "success": True,
+            "message": "Quota refresh process started with high priority",
+            "process_id": process_id,
+            "priority": "HIGH"
+        }
+    except Exception as e:
+        logger.error(f"Error triggering quota refresh: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to start quota refresh process"
+        )

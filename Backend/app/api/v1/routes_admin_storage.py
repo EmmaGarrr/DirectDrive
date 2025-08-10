@@ -1,12 +1,21 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta
-from app.services.admin_auth_service import get_current_admin, log_admin_activity, get_client_ip
+from datetime import datetime, timedelta, timezone
+from pydantic import BaseModel
+import json
+
+from app.services.admin_auth_service import (
+    get_current_admin,
+    log_admin_activity,
+    get_client_ip,
+)
 from app.models.admin import AdminUserInDB
 from app.db.mongodb import db
 from app.services.google_drive_service import gdrive_pool_manager
-from pydantic import BaseModel, EmailStr
-import json
+from app.services.google_drive_account_service import (
+    GoogleDriveAccountService,
+)
+from app.models.google_drive_account import GoogleDriveAccountCreate
 
 router = APIRouter()
 
@@ -39,255 +48,208 @@ class AccountCredentials(BaseModel):
 @router.get("/storage/google-drive/accounts")
 async def list_google_drive_accounts(
     request: Request,
-    current_admin: AdminUserInDB = Depends(get_current_admin)
+    refresh: bool = Query(False, description="Force refresh from Google Drive API"),
+    current_admin: AdminUserInDB = Depends(get_current_admin),
 ):
-    """List all Google Drive accounts with their status and usage"""
+    """List all Google Drive accounts with their status and usage (smart cached data)."""
+
+    # Fetch accounts from DB
+    accounts = await GoogleDriveAccountService.get_all_accounts()
     
-    # Get account information from the pool manager
-    accounts_info = []
+    # Smart caching logic: Only refresh if explicitly requested or if data is very stale (>15 minutes)
+    cache_expiry_seconds = 900  # 15 minutes
+    needs_refresh = refresh
+    cache_status = "fresh"
     
-    # Mock implementation - in production, this would query actual Google Drive accounts
-    mock_accounts = [
-        {
-            "account_id": "account_1",
-            "email": "storage1@directdrive.service.com",
-            "is_active": True,
-            "storage_used": 450 * 1024 * 1024 * 1024,  # 450GB
-            "storage_quota": 15 * 1024 * 1024 * 1024 * 1024,  # 15TB
-            "files_count": 603,
-            "last_activity": datetime.utcnow() - timedelta(minutes=5),
-            "health_status": "healthy",
-            "performance_score": 95.2
-        },
-        {
-            "account_id": "account_2", 
-            "email": "storage2@directdrive.service.com",
-            "is_active": True,
-            "storage_used": 280 * 1024 * 1024 * 1024,  # 280GB
-            "storage_quota": 15 * 1024 * 1024 * 1024 * 1024,  # 15TB
-            "files_count": 387,
-            "last_activity": datetime.utcnow() - timedelta(minutes=2),
-            "health_status": "healthy",
-            "performance_score": 87.8
-        },
-        {
-            "account_id": "account_3",
-            "email": "storage3@directdrive.service.com", 
-            "is_active": False,
-            "storage_used": 1.2 * 1024 * 1024 * 1024 * 1024,  # 1.2TB
-            "storage_quota": 15 * 1024 * 1024 * 1024 * 1024,  # 15TB
-            "files_count": 150,
-            "last_activity": datetime.utcnow() - timedelta(hours=2),
-            "health_status": "quota_warning",
-            "performance_score": 45.3
-        }
-    ]
+    if not refresh:
+        # Check if any account data is stale using consistent timezone handling
+        current_time = datetime.now()
+        for account in accounts:
+            if account.last_quota_check:
+                # Convert UTC timestamp to local time for consistent comparison
+                local_quota_check = account.last_quota_check.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
+                time_diff = (current_time - local_quota_check).total_seconds()
+                if time_diff > cache_expiry_seconds:
+                    needs_refresh = True
+                    cache_status = "stale"
+                    break
     
-    # Enrich with calculated metrics
-    for account in mock_accounts:
-        account["storage_used_formatted"] = format_storage_size(account["storage_used"])
-        account["storage_quota_formatted"] = format_storage_size(account["storage_quota"])
-        account["storage_percentage"] = (account["storage_used"] / account["storage_quota"]) * 100
-        account["average_file_size"] = account["storage_used"] / max(account["files_count"], 1)
-        account["average_file_size_formatted"] = format_storage_size(account["average_file_size"])
+    # Perform refresh if needed
+    if needs_refresh:
+        try:
+            for account in accounts:
+                if account.is_active:
+                    try:
+                        await GoogleDriveAccountService._update_account_quota(account)
+                    except Exception as e:
+                        print(f"Failed to refresh account {account.account_id}: {e}")
+            
+            # Re-fetch accounts after refresh
+            accounts = await GoogleDriveAccountService.get_all_accounts()
+            cache_status = "fresh"
+        except Exception as e:
+            print(f"Error during bulk refresh: {e}")
+            cache_status = "error"
+
+    account_responses = []
+    for acc in accounts:
+        response_data = GoogleDriveAccountService.to_response_model(acc).dict()
         
-        # Health status logic
-        if account["storage_percentage"] > 90:
-            account["health_status"] = "critical"
-        elif account["storage_percentage"] > 80:
-            account["health_status"] = "warning"
-        elif not account["is_active"]:
-            account["health_status"] = "inactive"
+        # Add folder information and freshness indicator
+        response_data["folder_info"] = {
+            "folder_id": acc.folder_id,
+            "folder_name": acc.folder_name or "Root",
+            "folder_path": acc.folder_path or "/",
+        }
+        # Fix: Use consistent local time for all timestamp calculations
+        if acc.last_quota_check:
+            # Convert UTC timestamp to local time for consistent display
+            local_quota_check = acc.last_quota_check.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
+            response_data["last_quota_check"] = local_quota_check.isoformat()
+            
+            # Calculate data freshness using local time - use same threshold as header cache (15 minutes)
+            current_time = datetime.now()
+            time_diff = (current_time - local_quota_check).total_seconds()
+            response_data["data_freshness"] = "fresh" if time_diff < 900 else "stale"  # 15 minutes = 900 seconds (same as cache_expiry_seconds)
         else:
-            account["health_status"] = "healthy"
-    
-    # Overall statistics
-    total_storage_used = sum(account["storage_used"] for account in mock_accounts)
-    total_storage_quota = sum(account["storage_quota"] for account in mock_accounts)
-    active_accounts = sum(1 for account in mock_accounts if account["is_active"])
-    
+            response_data["last_quota_check"] = None
+            response_data["data_freshness"] = "stale"
+        
+        account_responses.append(response_data)
+
+    # Aggregated statistics
+    stats = await GoogleDriveAccountService.get_account_statistics()
     statistics = {
-        "total_accounts": len(mock_accounts),
-        "active_accounts": active_accounts,
-        "inactive_accounts": len(mock_accounts) - active_accounts,
-        "total_storage_used": total_storage_used,
-        "total_storage_used_formatted": format_storage_size(total_storage_used),
-        "total_storage_quota": total_storage_quota,
-        "total_storage_quota_formatted": format_storage_size(total_storage_quota),
-        "overall_usage_percentage": (total_storage_used / total_storage_quota) * 100,
-        "total_files": sum(account["files_count"] for account in mock_accounts)
+        "total_accounts": len(accounts),
+        "active_accounts": stats.get("active_accounts", 0),
+        "total_storage_used": stats.get("total_storage_used", 0),
+        "total_storage_quota": stats.get("total_storage_quota", 0),
+        "average_performance": stats.get("average_performance", 0),
     }
-    
-    # Log admin activity
+
     await log_admin_activity(
         admin_email=current_admin.email,
         action="view_gdrive_accounts",
-        details="Viewed Google Drive accounts list",
+        details=f"Viewed Google Drive accounts list (refresh={refresh}, cache_status={cache_status})",
         ip_address=get_client_ip(request),
-        endpoint="/api/v1/admin/storage/google-drive/accounts"
+        endpoint="/api/v1/admin/storage/google-drive/accounts",
     )
-    
+
     return {
-        "accounts": mock_accounts,
-        "statistics": statistics
+        "accounts": account_responses, 
+        "statistics": statistics,
+        "cache_info": {
+            "status": cache_status,
+            "last_updated": datetime.now().isoformat(),
+            "cache_expiry_seconds": cache_expiry_seconds,
+            "is_forced_refresh": refresh
+        }
     }
 
 @router.get("/storage/google-drive/accounts/{account_id}")
 async def get_google_drive_account_detail(
     account_id: str,
     request: Request,
-    current_admin: AdminUserInDB = Depends(get_current_admin)
+    current_admin: AdminUserInDB = Depends(get_current_admin),
 ):
-    """Get detailed information about a specific Google Drive account"""
-    
-    # Mock detailed account information
-    account_details = {
-        "account_id": account_id,
-        "email": f"storage{account_id.split('_')[1]}@directdrive.service.com",
-        "is_active": True,
-        "created_at": datetime.utcnow() - timedelta(days=45),
-        "last_health_check": datetime.utcnow() - timedelta(minutes=5),
-        "storage_metrics": {
-            "used": 450 * 1024 * 1024 * 1024,
-            "quota": 15 * 1024 * 1024 * 1024 * 1024,
-            "available": 14.6 * 1024 * 1024 * 1024 * 1024,
-            "usage_percentage": 3.0
-        },
-        "performance_metrics": {
-            "upload_success_rate": 96.8,
-            "average_upload_speed": 50.2,  # MB/s
-            "last_week_uploads": 245,
-            "last_week_failures": 8,
-            "response_time_ms": 150
-        },
-        "files_statistics": {
-            "total_files": 603,
-            "by_type": {
-                "images": 245,
-                "documents": 167,
-                "videos": 89,
-                "archives": 78,
-                "others": 24
-            }
-        },
-        "recent_activity": [
-            {
-                "timestamp": datetime.utcnow() - timedelta(minutes=5),
-                "action": "file_upload",
-                "file_name": "presentation.pdf",
-                "file_size": 12 * 1024 * 1024,
-                "status": "success"
-            },
-            {
-                "timestamp": datetime.utcnow() - timedelta(minutes=15),
-                "action": "file_upload", 
-                "file_name": "video.mp4",
-                "file_size": 156 * 1024 * 1024,
-                "status": "success"
-            },
-            {
-                "timestamp": datetime.utcnow() - timedelta(hours=1),
-                "action": "health_check",
-                "details": "Account health verification",
-                "status": "healthy"
-            }
-        ]
-    }
-    
-    # Format sizes
-    metrics = account_details["storage_metrics"]
-    metrics["used_formatted"] = format_storage_size(metrics["used"])
-    metrics["quota_formatted"] = format_storage_size(metrics["quota"])
-    metrics["available_formatted"] = format_storage_size(metrics["available"])
-    
-    # Format activity file sizes
-    for activity in account_details["recent_activity"]:
-        if "file_size" in activity:
-            activity["file_size_formatted"] = format_storage_size(activity["file_size"])
-    
-    # Log admin activity
+    """Get detailed information about a specific Google Drive account (real data)."""
+
+    account = await GoogleDriveAccountService.get_account_by_id(account_id)
+    if not account:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+
+    # Ensure quota and folder info is fresh
+    try:
+        await GoogleDriveAccountService._update_account_quota(account)  # type: ignore
+    except Exception:
+        pass
+
     await log_admin_activity(
         admin_email=current_admin.email,
         action="view_gdrive_account_detail",
         details=f"Viewed detailed info for Google Drive account: {account_id}",
         ip_address=get_client_ip(request),
-        endpoint=f"/api/v1/admin/storage/google-drive/accounts/{account_id}"
+        endpoint=f"/api/v1/admin/storage/google-drive/accounts/{account_id}",
     )
-    
-    return account_details
+
+    return GoogleDriveAccountService.to_response_model(account)
 
 @router.post("/storage/google-drive/accounts/{account_id}/toggle")
 async def toggle_google_drive_account(
     account_id: str,
     request: Request,
-    current_admin: AdminUserInDB = Depends(get_current_admin)
+    current_admin: AdminUserInDB = Depends(get_current_admin),
 ):
-    """Enable or disable a Google Drive account"""
-    
-    # Mock implementation - in production, this would update the actual account status
-    new_status = True  # This would be determined by current status
-    
-    # Log admin activity
-    action = "enable" if new_status else "disable"
+    """Enable or disable a Google Drive account (real)."""
+
+    updated = await GoogleDriveAccountService.toggle_account_status(account_id)
+    if not updated:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+
     await log_admin_activity(
         admin_email=current_admin.email,
-        action=f"gdrive_account_{action}",
-        details=f"{'Enabled' if new_status else 'Disabled'} Google Drive account: {account_id}",
+        action="gdrive_account_toggle",
+        details=f"Toggled Google Drive account: {account_id} -> is_active={updated.is_active}",
         ip_address=get_client_ip(request),
-        endpoint=f"/api/v1/admin/storage/google-drive/accounts/{account_id}/toggle"
+        endpoint=f"/api/v1/admin/storage/google-drive/accounts/{account_id}/toggle",
     )
-    
-    return {
-        "message": f"Account {account_id} {'enabled' if new_status else 'disabled'} successfully",
-        "account_id": account_id,
-        "is_active": new_status
-    }
+
+    # Reload the pool so toggle takes effect for uploads
+    try:
+        await gdrive_pool_manager.reload_from_db()  # type: ignore
+    except Exception as e:
+        print(f"[ADMIN_STORAGE] Pool reload failed after toggle: {e}")
+
+    return {"message": "Account status updated", "account_id": account_id, "is_active": updated.is_active}
 
 @router.post("/storage/google-drive/accounts")
 async def add_google_drive_account(
     credentials: AccountCredentials,
     request: Request,
-    current_admin: AdminUserInDB = Depends(get_current_admin)
+    current_admin: AdminUserInDB = Depends(get_current_admin),
 ):
-    """Add a new Google Drive account"""
-    
-    # Validate service account key JSON
+    """Add a new Google Drive account (service account or OAuth)."""
+
+    # Validate JSON early
     try:
-        key_data = json.loads(credentials.service_account_key)
-        if not all(key in key_data for key in ["type", "project_id", "private_key_id", "private_key", "client_email"]):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid service account key format"
-            )
+        json.loads(credentials.service_account_key)
     except json.JSONDecodeError:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid JSON format for service account key"
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON format for service account key"
         )
-    
-    # Mock account creation
-    new_account_id = f"account_{len(await list_google_drive_accounts(request, current_admin)) + 1}"
-    
-    # In production, this would:
-    # 1. Validate the credentials against Google Drive API
-    # 2. Test account access and permissions
-    # 3. Store encrypted credentials securely
-    # 4. Add to the pool manager
-    
-    # Log admin activity
+
+    try:
+        created = await GoogleDriveAccountService.create_account(
+            GoogleDriveAccountCreate(
+                email=credentials.account_email,
+                alias=credentials.account_alias,
+                service_account_key=credentials.service_account_key,
+            )
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to add account: {e}")
+
     await log_admin_activity(
         admin_email=current_admin.email,
         action="add_gdrive_account",
         details=f"Added new Google Drive account: {credentials.account_alias} ({credentials.account_email})",
         ip_address=get_client_ip(request),
-        endpoint="/api/v1/admin/storage/google-drive/accounts"
+        endpoint="/api/v1/admin/storage/google-drive/accounts",
     )
-    
+
+    # Reload the pool so the new account can be selected immediately
+    try:
+        await gdrive_pool_manager.reload_from_db()  # type: ignore
+    except Exception as e:
+        print(f"[ADMIN_STORAGE] Pool reload failed after add: {e}")
+
     return {
         "message": "Google Drive account added successfully",
-        "account_id": new_account_id,
-        "account_email": credentials.account_email,
-        "account_alias": credentials.account_alias
+        "account_id": created.account_id,
+        "account_email": created.email,
+        "account_alias": created.alias,
     }
 
 @router.delete("/storage/google-drive/accounts/{account_id}")
@@ -295,39 +257,130 @@ async def remove_google_drive_account(
     account_id: str,
     request: Request,
     force: bool = Query(False, description="Force removal even if account has files"),
-    current_admin: AdminUserInDB = Depends(get_current_admin)
+    current_admin: AdminUserInDB = Depends(get_current_admin),
 ):
-    """Remove a Google Drive account"""
-    
-    # Check if account has files (mock check)
-    files_count = 150  # Mock file count
-    
-    if files_count > 0 and not force:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Account has {files_count} files. Use force=true to remove anyway, or migrate files first."
-        )
-    
-    # Mock removal logic
-    # In production, this would:
-    # 1. Check if account has files
-    # 2. Optionally migrate files to other accounts
-    # 3. Remove from pool manager
-    # 4. Securely delete stored credentials
-    
-    # Log admin activity
+    """Remove a Google Drive account (real)."""
+
+    try:
+        deleted = await GoogleDriveAccountService.delete_account(account_id, force=force)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+
     await log_admin_activity(
         admin_email=current_admin.email,
         action="remove_gdrive_account",
         details=f"Removed Google Drive account: {account_id} (force={force})",
         ip_address=get_client_ip(request),
-        endpoint=f"/api/v1/admin/storage/google-drive/accounts/{account_id}"
+        endpoint=f"/api/v1/admin/storage/google-drive/accounts/{account_id}",
     )
+
+    # Reload the pool so the removed account is no longer used
+    try:
+        await gdrive_pool_manager.reload_from_db()  # type: ignore
+    except Exception as e:
+        print(f"[ADMIN_STORAGE] Pool reload failed after remove: {e}")
+
+    return {"message": f"Google Drive account {account_id} removed successfully"}
+
+@router.post("/storage/google-drive/accounts/{account_id}/delete-all-files")
+async def delete_all_files_from_account(
+    account_id: str,
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin),
+):
+    """Delete all files from a specific Google Drive account folder"""
     
-    return {
-        "message": f"Google Drive account {account_id} removed successfully",
-        "files_affected": files_count if force else 0
-    }
+    try:
+        print(f"🗑️ [DELETE_ALL_FILES] Starting deletion for account: {account_id}")
+        
+        # Get the account
+        account = await GoogleDriveAccountService.get_account_by_id(account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="Google Drive account not found")
+        
+        # Delete all files in the account's folder
+        result = await GoogleDriveAccountService.delete_all_files_in_account_folder(account)
+        
+        # Also soft-delete all related files in MongoDB for this account
+        soft_delete_result = db.files.update_many(
+            {"gdrive_account_id": account_id, "deleted_at": {"$exists": False}},
+            {"$set": {
+                "deleted_at": datetime.now(),
+                "status": "deleted", 
+                "deleted_by": current_admin.email,
+                "deletion_reason": f"bulk_delete_account_{account_id}"
+            }}
+        )
+        
+        print(f"🗑️ [DELETE_ALL_FILES] Account {account_id}: GDrive deleted={result.get('deleted', 0)}, MongoDB soft-deleted={soft_delete_result.modified_count}")
+        
+        await log_admin_activity(
+            admin_email=current_admin.email,
+            action="delete_all_account_files",
+            details=f"Deleted all files from Google Drive account {account_id}. GDrive: {result.get('deleted', 0)} files, MongoDB: {soft_delete_result.modified_count} records",
+            ip_address=get_client_ip(request),
+            endpoint=f"/api/v1/admin/storage/google-drive/accounts/{account_id}/delete-all-files",
+        )
+        
+        return {
+            "message": f"All files deleted from account {account_id}",
+            "gdrive_deleted": result.get("deleted", 0),
+            "gdrive_errors": result.get("errors", 0),
+            "mongodb_soft_deleted": soft_delete_result.modified_count,
+            "details": result
+        }
+        
+    except Exception as e:
+        print(f"🗑️ [DELETE_ALL_FILES] Error for account {account_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete files: {str(e)}")
+
+@router.post("/storage/google-drive/accounts/{account_id}/refresh-stats")
+async def refresh_account_stats(
+    account_id: str,
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin),
+):
+    """Manually refresh stats for a specific Google Drive account"""
+    
+    try:
+        print(f"🔄 [REFRESH_STATS] Refreshing stats for account: {account_id}")
+        
+        # Get the account
+        account = await GoogleDriveAccountService.get_account_by_id(account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="Google Drive account not found")
+        
+        # Force refresh account quota and file counts from Google Drive API
+        await GoogleDriveAccountService._update_account_quota(account)
+        
+        # Get updated account data
+        updated_account = await GoogleDriveAccountService.get_account_by_id(account_id)
+        
+        print(f"🔄 [REFRESH_STATS] Account {account_id} refreshed: {updated_account.files_count} files, {updated_account.storage_used} bytes")
+        
+        await log_admin_activity(
+            admin_email=current_admin.email,
+            action="refresh_account_stats",
+            details=f"Manually refreshed stats for Google Drive account {account_id}",
+            ip_address=get_client_ip(request),
+            endpoint=f"/api/v1/admin/storage/google-drive/accounts/{account_id}/refresh-stats",
+        )
+        
+        return {
+            "message": f"Stats refreshed for account {account_id}",
+            "files_count": updated_account.files_count,
+            "storage_used": updated_account.storage_used,
+            "storage_quota": updated_account.storage_quota,
+            "storage_used_formatted": GoogleDriveAccountService.format_storage_size(updated_account.storage_used),
+            "storage_quota_formatted": GoogleDriveAccountService.format_storage_size(updated_account.storage_quota)
+        }
+        
+    except Exception as e:
+        print(f"🔄 [REFRESH_STATS] Error for account {account_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to refresh stats: {str(e)}")
 
 @router.get("/storage/google-drive/load-balancing")
 async def get_load_balancing_config(
@@ -352,7 +405,7 @@ async def get_load_balancing_config(
             "recovery_time_minutes": 30
         },
         "health_check_interval": 300,  # seconds
-        "last_updated": datetime.utcnow() - timedelta(days=2),
+        "last_updated": datetime.now() - timedelta(days=2),
         "updated_by": "system@directdrive.com"
     }
     
@@ -438,7 +491,7 @@ async def update_load_balancing_config(
     return {
         "message": "Load balancing configuration updated successfully",
         "configuration": config.dict(),
-        "updated_at": datetime.utcnow(),
+        "updated_at": datetime.now(),
         "updated_by": current_admin.email
     }
 
@@ -446,63 +499,131 @@ async def update_load_balancing_config(
 async def perform_health_check(
     account_id: str,
     request: Request,
-    current_admin: AdminUserInDB = Depends(get_current_admin)
+    current_admin: AdminUserInDB = Depends(get_current_admin),
 ):
-    """Perform manual health check on a Google Drive account"""
-    
-    # Mock health check results
-    health_check_result = {
-        "account_id": account_id,
-        "check_timestamp": datetime.utcnow(),
-        "overall_status": "healthy",
-        "checks": {
-            "api_connectivity": {
-                "status": "pass",
-                "response_time_ms": 145,
-                "details": "Successfully connected to Google Drive API"
-            },
-            "authentication": {
-                "status": "pass",
-                "details": "Service account authentication successful"
-            },
-            "permissions": {
-                "status": "pass",
-                "details": "All required permissions available"
-            },
-            "quota_status": {
-                "status": "pass",
-                "usage_percentage": 3.0,
-                "details": "Storage usage within normal limits"
-            },
-            "performance": {
-                "status": "warning",
-                "upload_success_rate": 94.2,
-                "details": "Success rate slightly below optimal (96%+)"
-            }
-        },
-        "recommendations": [
-            "Monitor upload success rate closely",
-            "Consider account optimization if performance degrades further"
-        ]
-    }
-    
-    # Determine overall status
-    statuses = [check["status"] for check in health_check_result["checks"].values()]
-    if "fail" in statuses:
-        health_check_result["overall_status"] = "unhealthy"
-    elif "warning" in statuses:
-        health_check_result["overall_status"] = "warning"
-    
-    # Log admin activity
+    """Perform manual health check on a Google Drive account (real connectivity check)."""
+
+    account = await GoogleDriveAccountService.get_account_by_id(account_id)
+    if not account:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+
+    status_label = "healthy"
+    details: Dict[str, Any] = {}
+    try:
+        # Try updating quota and folder meta as a health probe
+        await GoogleDriveAccountService._update_account_quota(account)  # type: ignore
+        details["quota_check"] = "ok"
+    except Exception as e:
+        status_label = "unhealthy"
+        details["quota_check"] = f"error: {e}"
+
     await log_admin_activity(
         admin_email=current_admin.email,
         action="gdrive_health_check",
-        details=f"Performed health check on account {account_id}: {health_check_result['overall_status']}",
+        details=f"Performed health check on account {account_id}: {status_label}",
         ip_address=get_client_ip(request),
-        endpoint=f"/api/v1/admin/storage/google-drive/accounts/{account_id}/health-check"
+        endpoint=f"/api/v1/admin/storage/google-drive/accounts/{account_id}/health-check",
+    )
+
+    return {
+        "account_id": account_id,
+        "overall_status": status_label,
+        "check_timestamp": datetime.now(),
+        "details": details,
+    }
+
+@router.post("/storage/google-drive/reset-all")
+async def reset_all_storage(
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin),
+    hard: bool = Query(False, description="If true, hard-delete all file and batch records from Mongo")
+):
+    """Dangerous operation: Delete all files under configured Google Drive folders for all accounts
+    and reset all file metadata in MongoDB (soft-delete) with optional hard purge.
+    """
+    try:
+        # 1) Delete files from Google Drive folders for all accounts
+        gdrive_result = await GoogleDriveAccountService.delete_all_files_all_accounts()
+
+        # 2) Reset MongoDB file records
+        if hard:
+            files_deleted = db.files.delete_many({})
+            batches_deleted = db.batches.delete_many({})
+            files_marked_deleted = 0
+        else:
+            # Mark all files as deleted and set deleted_at to now
+            deleted_mark = db.files.update_many(
+                {"deleted_at": {"$exists": False}},
+                {"$set": {"deleted_at": datetime.now(), "status": "deleted", "deletion_reason": "reset_all_storage"}}
+            )
+            # Also clear batches to avoid dangling references
+            batches_deleted = db.batches.delete_many({})
+            files_deleted = None
+            files_marked_deleted = deleted_mark.modified_count
+
+        # 3) Reset account stats by forcing quota refresh
+        await GoogleDriveAccountService.update_all_accounts_quota()
+
+        await log_admin_activity(
+            admin_email=current_admin.email,
+            action="reset_all_storage",
+            details=f"Reset storage and metadata. GDrive result: {gdrive_result['summary']}",
+            ip_address=get_client_ip(request),
+            endpoint="/api/v1/admin/storage/google-drive/reset-all",
+        )
+
+        return {
+            "message": "All storage reset initiated and metadata cleared",
+            "gdrive": gdrive_result,
+            "files_marked_deleted": files_marked_deleted,
+            "files_hard_deleted": (files_deleted.deleted_count if files_deleted else 0),
+            "batches_deleted": batches_deleted.deleted_count,
+            "mode": "hard" if hard else "soft"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Reset failed: {e}")
+
+@router.get("/storage/google-drive/combined-stats")
+async def get_combined_google_drive_stats(
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin),
+):
+    """Get combined Google Drive storage statistics for dashboard"""
+    
+    # Get aggregated statistics from all accounts
+    stats = await GoogleDriveAccountService.get_account_statistics()
+    
+    # Calculate available storage
+    total_quota = stats.get("total_storage_quota", 0)
+    total_used = stats.get("total_storage_used", 0)
+    available_storage = max(0, total_quota - total_used)
+    
+    # Calculate usage percentage
+    usage_percentage = (total_used / total_quota * 100) if total_quota > 0 else 0
+    
+    # Format storage sizes
+    combined_stats = {
+        "total_accounts": stats.get("total_accounts", 0),
+        "active_accounts": stats.get("active_accounts", 0),
+        "total_storage_quota": total_quota,
+        "total_storage_quota_formatted": format_storage_size(total_quota),
+        "total_storage_used": total_used,
+        "total_storage_used_formatted": format_storage_size(total_used),
+        "available_storage": available_storage,
+        "available_storage_formatted": format_storage_size(available_storage),
+        "usage_percentage": round(usage_percentage, 1),
+        "health_status": "good" if usage_percentage < 80 else "warning" if usage_percentage < 95 else "critical"
+    }
+    
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action="view_gdrive_combined_stats",
+        details="Viewed combined Google Drive storage statistics",
+        ip_address=get_client_ip(request),
+        endpoint="/api/v1/admin/storage/google-drive/combined-stats",
     )
     
-    return health_check_result
+    return combined_stats
 
 def format_storage_size(bytes_size: int) -> str:
     """Format storage size in human readable format"""

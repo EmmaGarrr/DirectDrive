@@ -13,6 +13,10 @@ from app.models.file import UploadStatus, StorageLocation
 from app.core.config import settings
 # Use the new, stable backup service
 from app.services import backup_service
+from app.services.google_drive_account_service import GoogleDriveAccountService
+from app.services.google_drive_service import gdrive_pool_manager
+# Priority queue middleware
+from app.middleware.priority_middleware import PriorityMiddleware
 
 # Strict concurrency limiter for server stability
 BACKUP_TASK_SEMAPHORE = asyncio.Semaphore(1)
@@ -70,7 +74,38 @@ class ConnectionManager:
 manager = ConnectionManager()
 app = FastAPI(title="File Transfer Service")
 origins = ["http://localhost:4200", "http://135.148.33.247", "https://teletransfer.vercel.app", "https://*.vercel.app"]
+
+# Add priority middleware first (before CORS)
+app.add_middleware(PriorityMiddleware)
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+# --- Startup hooks for storage account health and pool sync ---
+@app.on_event("startup")
+async def startup_storage_management():
+    try:
+        # Ensure accounts collection exists, migrate from env on first run, and sync
+        await GoogleDriveAccountService.initialize_service()
+        # Prefer DB-backed pool over env; reload once at startup
+        await gdrive_pool_manager.reload_from_db()  # type: ignore
+        print("[MAIN] Google Drive account service initialized and pool reloaded from DB")
+    except Exception as e:
+        print(f"[MAIN] Startup storage management init failed: {e}")
+
+    # Periodically refresh quota/health to keep gating accurate
+    async def periodic_account_health_refresh():
+        while True:
+            try:
+                await GoogleDriveAccountService.update_all_accounts_quota()
+            except Exception as e:
+                print(f"[MAIN] Periodic account quota refresh failed: {e}")
+            # Refresh every 15 minutes
+            await asyncio.sleep(900)
+
+    try:
+        asyncio.create_task(periodic_account_health_refresh())
+        print("[MAIN] Scheduled periodic account health refresh task")
+    except Exception as e:
+        print(f"[MAIN] Failed to schedule periodic account health refresh: {e}")
 
 @app.websocket("/ws_admin")
 async def websocket_admin_endpoint(websocket: WebSocket, token: str = ""):
@@ -198,6 +233,18 @@ async def websocket_upload_proxy(websocket: WebSocket, file_id: str, gdrive_url:
 
         db.files.update_one({"_id": file_id}, {"$set": {"gdrive_id": gdrive_id, "status": UploadStatus.COMPLETED, "storage_location": StorageLocation.GDRIVE }})
         await websocket.send_json({"type": "success", "value": f"/api/v1/download/stream/{file_id}"})
+
+        # Update Google Drive account stats promptly after successful upload
+        try:
+            updated_doc = db.files.find_one({"_id": file_id})
+            if updated_doc and updated_doc.get("gdrive_account_id"):
+                from app.services.google_drive_account_service import GoogleDriveAccountService
+                await GoogleDriveAccountService.update_account_after_file_operation(
+                    updated_doc.get("gdrive_account_id"),
+                    updated_doc.get("size_bytes", 0)
+                )
+        except Exception as e:
+            print(f"[MAIN] Failed to update account stats after upload {file_id}: {e}")
         
         print(f"[MAIN] Triggering silent Hetzner backup for file_id: {file_id}")
         asyncio.create_task(run_controlled_backup(file_id))
