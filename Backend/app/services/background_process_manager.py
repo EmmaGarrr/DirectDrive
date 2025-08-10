@@ -118,26 +118,45 @@ class BackgroundProcess:
         }
 
 class BackgroundProcessManager:
-    """Manages background processes with priority-based execution"""
+    """Manages background processes with priority-based queuing"""
     
     def __init__(self):
-        self.processes: Dict[str, BackgroundProcess] = {}
+        self.processes = {}  # Store active processes
         self.admin_queue = asyncio.PriorityQueue()  # Priority queue for admin processes
         self.user_queue = asyncio.PriorityQueue()   # Priority queue for user processes
         self.admin_workers = 2  # Number of admin workers
         self.user_workers = 3   # Number of user workers
         self.running = False
-        self._start_workers()
+        self._workers_started = False  # Track if workers have been started
+        # Don't start workers during import - start them lazily when needed
+    
+    def _ensure_workers_started(self):
+        """Ensure workers are started (lazy initialization)"""
+        if not self._workers_started and not self.running:
+            self._start_workers()
     
     def _start_workers(self):
         """Start background worker tasks"""
+        if self._workers_started:
+            return
+            
         self.running = True
+        self._workers_started = True
         
-        for i in range(self.admin_workers):
-            asyncio.create_task(self._admin_worker(f"admin_worker_{i}"))
-        
-        for i in range(self.user_workers):
-            asyncio.create_task(self._user_worker(f"user_worker_{i}"))
+        # Start workers in a new event loop if none exists
+        try:
+            loop = asyncio.get_running_loop()
+            # We're in an async context, start workers normally
+            for i in range(self.admin_workers):
+                asyncio.create_task(self._admin_worker(f"admin_worker_{i}"))
+            
+            for i in range(self.user_workers):
+                asyncio.create_task(self._user_worker(f"user_worker_{i}"))
+                
+        except RuntimeError:
+            # No running loop, workers will be started when first async method is called
+            logger.info("No running event loop, workers will start when needed")
+            return
         
         logger.info(f"Started {self.admin_workers} admin workers and {self.user_workers} user workers")
     
@@ -234,9 +253,11 @@ class BackgroundProcessManager:
         admin_initiated: bool = False,
         metadata: Optional[Dict[str, Any]] = None
     ) -> str:
-        """Add a new background process"""
-        process_id = str(uuid.uuid4())
+        """Add a new background process to the appropriate queue"""
+        # Ensure workers are started when adding first process
+        self._ensure_workers_started()
         
+        process_id = str(uuid.uuid4())
         process = BackgroundProcess(
             process_id=process_id,
             process_type=process_type,
@@ -248,19 +269,18 @@ class BackgroundProcessManager:
         if metadata:
             process.metadata.update(metadata)
         
+        # Store the process
         self.processes[process_id] = process
         
         # Add to appropriate queue based on priority and type
         if admin_initiated or priority in [ProcessPriority.CRITICAL, ProcessPriority.HIGH]:
-            # Admin processes go to admin queue with higher priority
-            queue_priority = (priority.value, process.created_at.timestamp())
-            self.admin_queue.put_nowait((queue_priority, process))
-            logger.info(f"Added admin process {process_id} to admin queue")
+            # Admin processes go to admin queue
+            self.admin_queue.put_nowait((priority.value, process))
+            logger.info(f"Added admin process {process_id} to admin queue with priority {priority.name}")
         else:
             # User processes go to user queue
-            queue_priority = (priority.value, process.created_at.timestamp())
-            self.user_queue.put_nowait((queue_priority, process))
-            logger.info(f"Added user process {process_id} to user queue")
+            self.user_queue.put_nowait((priority.value, process))
+            logger.info(f"Added user process {process_id} to user queue with priority {priority.name}")
         
         return process_id
     

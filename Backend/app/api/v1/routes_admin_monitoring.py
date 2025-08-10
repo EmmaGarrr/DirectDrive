@@ -1553,6 +1553,34 @@ async def get_active_processes(
             detail="Failed to get active processes"
         )
 
+@router.get("/processes/priority-info", response_model=Dict[str, Any])
+async def get_priority_system_info(current_admin: AdminUserInDB = Depends(get_current_admin)):
+    """Get information about the priority system and how it works"""
+    return {
+        "priority_system": {
+            "description": "Priority-based background process management system",
+            "admin_priority": "Admin operations get priority 1-2 (Critical/High)",
+            "user_priority": "User operations get priority 3-4 (Normal/Low)",
+            "admin_workers": "2 dedicated admin workers for high-priority tasks",
+            "user_workers": "3 user workers for normal operations",
+            "queue_behavior": "Admin workers can help with user tasks when admin queue is empty"
+        },
+        "process_types": {
+            "admin_quota_refresh": "Google Drive account quota updates",
+            "admin_storage_cleanup": "Storage optimization and cleanup",
+            "admin_backup_operation": "Backup and restore operations",
+            "user_file_upload": "File upload processing",
+            "user_file_download": "File download processing",
+            "user_batch_operation": "Batch file operations"
+        },
+        "priority_levels": {
+            "1": "CRITICAL - Admin operations that must complete immediately",
+            "2": "HIGH - Admin operations with high priority",
+            "3": "NORMAL - Regular user operations",
+            "4": "LOW - Background maintenance tasks"
+        }
+    }
+
 @router.get("/processes/{process_id}", response_model=Dict[str, Any])
 async def get_process_details(
     process_id: str,
@@ -1631,31 +1659,3 @@ async def trigger_quota_refresh(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to start quota refresh process"
         )
-
-@router.get("/processes/priority-info", response_model=Dict[str, Any])
-async def get_priority_system_info(current_admin: AdminUserInDB = Depends(get_current_admin)):
-    """Get information about the priority system and how it works"""
-    return {
-        "priority_system": {
-            "description": "Priority-based background process management system",
-            "admin_priority": "Admin operations get priority 1-2 (Critical/High)",
-            "user_priority": "User operations get priority 3-4 (Normal/Low)",
-            "admin_workers": "2 dedicated admin workers for high-priority tasks",
-            "user_workers": "3 user workers for normal operations",
-            "queue_behavior": "Admin workers can help with user tasks when admin queue is empty"
-        },
-        "process_types": {
-            "admin_quota_refresh": "Google Drive account quota updates",
-            "admin_storage_cleanup": "Storage optimization and cleanup",
-            "admin_backup_operation": "Backup and restore operations",
-            "user_file_upload": "File upload processing",
-            "user_file_download": "File download processing",
-            "user_batch_operation": "Batch file operations"
-        },
-        "priority_levels": {
-            "1": "CRITICAL - Admin operations that must complete immediately",
-            "2": "HIGH - Admin operations with high priority",
-            "3": "NORMAL - Regular user operations",
-            "4": "LOW - Background maintenance tasks"
-        }
-    }
