@@ -62,11 +62,13 @@ async def list_google_drive_accounts(
     cache_status = "fresh"
     
     if not refresh:
-        # Check if any account data is stale
+        # Check if any account data is stale using consistent timezone handling
         current_time = datetime.now()
         for account in accounts:
             if account.last_quota_check:
-                time_diff = (current_time - account.last_quota_check).total_seconds()
+                # Convert UTC timestamp to local time for consistent comparison
+                local_quota_check = account.last_quota_check.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
+                time_diff = (current_time - local_quota_check).total_seconds()
                 if time_diff > cache_expiry_seconds:
                     needs_refresh = True
                     cache_status = "stale"
@@ -99,14 +101,18 @@ async def list_google_drive_accounts(
             "folder_name": acc.folder_name or "Root",
             "folder_path": acc.folder_path or "/",
         }
-        # Fix: Ensure timezone-aware timestamp to prevent frontend parsing issues
-        response_data["last_quota_check"] = acc.last_quota_check.replace(tzinfo=timezone.utc).isoformat() if acc.last_quota_check else None
-        # Fix: Use total_seconds() instead of .seconds to get the full time difference  
-        current_time = datetime.now()
+        # Fix: Use consistent local time for all timestamp calculations
         if acc.last_quota_check:
-            time_diff = (current_time - acc.last_quota_check).total_seconds()
+            # Convert UTC timestamp to local time for consistent display
+            local_quota_check = acc.last_quota_check.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
+            response_data["last_quota_check"] = local_quota_check.isoformat()
+            
+            # Calculate data freshness using local time
+            current_time = datetime.now()
+            time_diff = (current_time - local_quota_check).total_seconds()
             response_data["data_freshness"] = "fresh" if time_diff < 300 else "stale"  # 5 minutes = 300 seconds
         else:
+            response_data["last_quota_check"] = None
             response_data["data_freshness"] = "stale"
         
         account_responses.append(response_data)
@@ -302,7 +308,7 @@ async def delete_all_files_from_account(
         soft_delete_result = db.files.update_many(
             {"gdrive_account_id": account_id, "deleted_at": {"$exists": False}},
             {"$set": {
-                "deleted_at": datetime.utcnow(),
+                "deleted_at": datetime.now(),
                 "status": "deleted", 
                 "deleted_by": current_admin.email,
                 "deletion_reason": f"bulk_delete_account_{account_id}"
@@ -399,7 +405,7 @@ async def get_load_balancing_config(
             "recovery_time_minutes": 30
         },
         "health_check_interval": 300,  # seconds
-        "last_updated": datetime.utcnow() - timedelta(days=2),
+        "last_updated": datetime.now() - timedelta(days=2),
         "updated_by": "system@directdrive.com"
     }
     
@@ -485,7 +491,7 @@ async def update_load_balancing_config(
     return {
         "message": "Load balancing configuration updated successfully",
         "configuration": config.dict(),
-        "updated_at": datetime.utcnow(),
+        "updated_at": datetime.now(),
         "updated_by": current_admin.email
     }
 
@@ -522,7 +528,7 @@ async def perform_health_check(
     return {
         "account_id": account_id,
         "overall_status": status_label,
-        "check_timestamp": datetime.utcnow(),
+        "check_timestamp": datetime.now(),
         "details": details,
     }
 
@@ -548,7 +554,7 @@ async def reset_all_storage(
             # Mark all files as deleted and set deleted_at to now
             deleted_mark = db.files.update_many(
                 {"deleted_at": {"$exists": False}},
-                {"$set": {"deleted_at": datetime.utcnow(), "status": "deleted", "deletion_reason": "reset_all_storage"}}
+                {"$set": {"deleted_at": datetime.now(), "status": "deleted", "deletion_reason": "reset_all_storage"}}
             )
             # Also clear batches to avoid dangling references
             batches_deleted = db.batches.delete_many({})
