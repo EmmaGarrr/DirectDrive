@@ -2018,6 +2018,145 @@ async def get_hetzner_analytics(
         "account_distribution": account_distribution
     }
 
+@router.post("/hetzner/delete-all-files")
+async def delete_all_hetzner_files(
+    request: Request,
+    reason: Optional[str] = Query(None),
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """
+    DANGEROUS OPERATION: Delete ALL files from Hetzner storage
+    This will permanently remove all data from Hetzner backup storage
+    """
+    try:
+        print(f"🚨 [DELETE_ALL_HETZNER] Admin {current_admin.email} requested complete Hetzner storage cleanup!")
+        print(f"🚨 [DELETE_ALL_HETZNER] Reason: {reason or 'No reason provided'}")
+        
+        from app.services.hetzner_service import HetznerService
+        
+        hetzner_stats_before = db.files.count_documents({
+            "backup_status": BackupStatus.COMPLETED,
+            "backup_location": StorageLocation.HETZNER,
+            "deleted_at": {"$exists": False}
+        })
+        
+        if hetzner_stats_before == 0:
+            return {
+                "message": "No files found in Hetzner storage - already empty",
+                "deleted_files": 0,
+                "deleted_dirs": 0,
+                "errors": 0,
+                "total_items": 0,
+                "storage_cleaned": "0 B"
+            }
+        
+        print(f"[DELETE_ALL_HETZNER] Found {hetzner_stats_before} files in database before deletion")
+        
+        hetzner_service = HetznerService()
+        deletion_result = await hetzner_service.delete_all_files()
+        
+        update_result = db.files.update_many(
+            {
+                "backup_status": BackupStatus.COMPLETED,
+                "backup_location": StorageLocation.HETZNER,
+                "deleted_at": {"$exists": False}
+            },
+            {
+                "$set": {
+                    "deleted_at": datetime.utcnow(),
+                    "status": "deleted",
+                    "deleted_by": current_admin.email,
+                    "deletion_reason": f"bulk_delete_all_hetzner_files: {reason or 'Complete storage cleanup'}"
+                }
+            }
+        )
+        
+        print(f"[DELETE_ALL_HETZNER] Database update result: {update_result.modified_count} files marked as deleted")
+        
+        await log_admin_activity(
+            admin_email=current_admin.email,
+            action="delete_all_hetzner_files",
+            details=f"Deleted all files from Hetzner storage. Hetzner: {deletion_result.get('deleted_files', 0)} files, {deletion_result.get('deleted_dirs', 0)} dirs, Database: {update_result.modified_count} records marked as deleted. Reason: {reason or 'Complete storage cleanup'}",
+            ip_address=get_client_ip(request),
+            endpoint="/api/v1/admin/hetzner/delete-all-files"
+        )
+        
+        response_data = {
+            "message": deletion_result.get("message", "Hetzner storage cleanup completed"),
+            "deleted_files": deletion_result.get("deleted_files", 0),
+            "deleted_dirs": deletion_result.get("deleted_dirs", 0),
+            "errors": deletion_result.get("errors", 0),
+            "total_items": deletion_result.get("total_items", 0),
+            "database_records_updated": update_result.modified_count,
+            "storage_cleaned": f"{hetzner_stats_before} files removed from backup storage",
+            "storage_info_before": deletion_result.get("storage_info_before", {}),
+            "storage_info_after": deletion_result.get("storage_info_after", {})
+        }
+        
+        print(f"✅ [DELETE_ALL_HETZNER] Complete Hetzner storage cleanup finished: {response_data}")
+        return response_data
+        
+    except Exception as e:
+        error_msg = f"Failed to delete all Hetzner files: {str(e)}"
+        print(f"!!! [DELETE_ALL_HETZNER] {error_msg}")
+        
+        try:
+            await log_admin_activity(
+                admin_email=current_admin.email,
+                action="delete_all_hetzner_files_failed",
+                details=f"Failed to delete all Hetzner files: {str(e)}",
+                ip_address=get_client_ip(request),
+                endpoint="/api/v1/admin/hetzner/delete-all-files"
+            )
+        except:
+            pass
+        
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_msg
+        )
+
+@router.get("/hetzner/storage-info")
+async def get_hetzner_storage_info(
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """
+    Get real-time storage information from Hetzner
+    Returns actual storage usage, not database records
+    """
+    try:
+        from app.services.hetzner_service import HetznerService
+        
+        hetzner_service = HetznerService()
+        storage_info = await hetzner_service.get_storage_info()
+        
+        return {
+            "message": "Hetzner storage information retrieved successfully",
+            "storage_info": storage_info,
+            "database_comparison": {
+                "database_files": db.files.count_documents({
+                    "backup_status": BackupStatus.COMPLETED,
+                    "backup_location": StorageLocation.HETZNER,
+                    "deleted_at": {"$exists": False}
+                }),
+                "actual_files": storage_info.get("total_files", 0),
+                "orphaned_files": max(0, storage_info.get("total_files", 0) - db.files.count_documents({
+                    "backup_status": BackupStatus.COMPLETED,
+                    "backup_location": StorageLocation.HETZNER,
+                    "deleted_at": {"$exists": False}
+                }))
+            }
+        }
+        
+    except Exception as e:
+        error_msg = f"Failed to get Hetzner storage info: {str(e)}"
+        print(f"!!! [GET_HETZNER_STORAGE_INFO] {error_msg}")
+        
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_msg
+        )
+
 # ================================
 # BACKUP MANAGEMENT ENDPOINTS
 # ================================
