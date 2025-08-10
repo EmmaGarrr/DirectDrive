@@ -1373,6 +1373,445 @@ def is_previewable(content_type: str) -> bool:
     return any(content_type.startswith(ptype) for ptype in previewable_types)
 
 # ================================
+<<<<<<< HEAD
+=======
+# DRIVE FILE MANAGEMENT ENDPOINTS
+# ================================
+
+@router.get("/drive/files")
+async def list_drive_files(
+    request: Request,
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    search: Optional[str] = Query(None),
+    file_type: Optional[str] = Query(None),
+    size_min: Optional[int] = Query(None),
+    size_max: Optional[int] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    owner_email: Optional[str] = Query(None),
+    backup_status: Optional[str] = Query(None),
+    sort_by: Optional[str] = Query("upload_date"),
+    sort_order: Optional[str] = Query("desc"),
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """List files that are stored on Google Drive (primary storage)"""
+    
+    # Build query for files stored on Google Drive
+    query = {
+        "storage_location": StorageLocation.GDRIVE,
+        "status": UploadStatus.COMPLETED
+    }
+    
+    # Search filter - search in filename
+    if search:
+        query["filename"] = {"$regex": re.escape(search), "$options": "i"}
+    
+    # File type filter based on MIME type
+    if file_type:
+        type_patterns = {
+            "image": "^image/",
+            "video": "^video/", 
+            "document": "^(application/(pdf|msword|vnd\\.openxmlformats-officedocument)|text/)",
+            "archive": "^application/(zip|x-rar|x-7z|gzip|x-tar)",
+            "audio": "^audio/"
+        }
+        if file_type in type_patterns:
+            query["content_type"] = {"$regex": type_patterns[file_type]}
+    
+    # Size filters
+    if size_min is not None or size_max is not None:
+        size_query = {}
+        if size_min is not None:
+            size_query["$gte"] = size_min
+        if size_max is not None:
+            size_query["$lte"] = size_max
+        query["size_bytes"] = size_query
+    
+    # Date filters
+    if date_from or date_to:
+        date_query = {}
+        if date_from:
+            try:
+                date_from_obj = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
+                date_query["$gte"] = date_from_obj
+            except ValueError:
+                pass
+        if date_to:
+            try:
+                date_to_obj = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
+                date_query["$lte"] = date_to_obj
+            except ValueError:
+                pass
+        if date_query:
+            query["upload_date"] = date_query
+    
+    # Owner filter
+    if owner_email:
+        query["owner_email"] = {"$regex": re.escape(owner_email), "$options": "i"}
+    
+    # Backup status filter
+    if backup_status:
+        query["backup_status"] = backup_status
+    
+    # Build sort
+    sort_field = sort_by if sort_by in ["filename", "size_bytes", "upload_date", "backup_status"] else "upload_date"
+    sort_direction = 1 if sort_order == "asc" else -1
+    sort = [(sort_field, sort_direction)]
+    
+    # Get total count
+    total_files = db.files.count_documents(query)
+    
+    # Calculate pagination
+    skip = (page - 1) * limit
+    total_pages = (total_files + limit - 1) // limit
+    
+    # Get files
+    files_cursor = db.files.find(query).sort(sort).skip(skip).limit(limit)
+    files = []
+    
+    for file_doc in files_cursor:
+        file_doc["_id"] = str(file_doc["_id"])
+        file_doc["size_formatted"] = format_file_size(file_doc.get("size_bytes", 0))
+        files.append(file_doc)
+    
+    # Get drive-specific statistics
+    drive_stats = {
+        "total_files": db.files.count_documents({"storage_location": StorageLocation.GDRIVE, "status": UploadStatus.COMPLETED}),
+        "total_storage": 0,
+        "total_storage_formatted": "0 B",
+        "transferring_to_hetzner": db.files.count_documents({"storage_location": StorageLocation.GDRIVE, "backup_status": BackupStatus.IN_PROGRESS}),
+        "backed_up_to_hetzner": db.files.count_documents({"storage_location": StorageLocation.GDRIVE, "backup_status": BackupStatus.COMPLETED}),
+        "failed_backups": db.files.count_documents({"storage_location": StorageLocation.GDRIVE, "backup_status": BackupStatus.FAILED})
+    }
+    
+    # Calculate total storage
+    storage_pipeline = [
+        {"$match": {"storage_location": StorageLocation.GDRIVE, "status": UploadStatus.COMPLETED}},
+        {"$group": {"_id": None, "total_size": {"$sum": "$size_bytes"}}}
+    ]
+    storage_result = list(db.files.aggregate(storage_pipeline))
+    if storage_result:
+        drive_stats["total_storage"] = storage_result[0]["total_size"]
+        drive_stats["total_storage_formatted"] = format_file_size(storage_result[0]["total_size"])
+    
+    # Log admin activity
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action="list_drive_files",
+        details=f"Listed {len(files)} drive files (page {page})",
+        ip_address=get_client_ip(request),
+        endpoint="/api/v1/admin/drive/files"
+    )
+    
+    return {
+        "files": files,
+        "total": total_files,
+        "page": page,
+        "limit": limit,
+        "total_pages": total_pages,
+        "drive_stats": drive_stats
+    }
+
+@router.get("/drive/analytics")
+async def get_drive_analytics(
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Get analytics for Google Drive files"""
+    
+    # File type distribution
+    type_pipeline = [
+        {"$match": {"storage_location": StorageLocation.GDRIVE, "status": UploadStatus.COMPLETED}},
+        {"$group": {
+            "_id": "$file_type",
+            "count": {"$sum": 1},
+            "total_size": {"$sum": "$size_bytes"}
+        }},
+        {"$sort": {"count": -1}}
+    ]
+    
+    type_results = list(db.files.aggregate(type_pipeline))
+    total_files = sum(item["count"] for item in type_results)
+    
+    file_types = []
+    for item in type_results:
+        percentage = (item["count"] / total_files * 100) if total_files > 0 else 0
+        file_types.append({
+            "_id": item["_id"] or "unknown",
+            "count": item["count"],
+            "total_size": item["total_size"],
+            "size_formatted": format_file_size(item["total_size"]),
+            "percentage": percentage
+        })
+    
+    # Backup status distribution
+    backup_pipeline = [
+        {"$match": {"storage_location": StorageLocation.GDRIVE, "status": UploadStatus.COMPLETED}},
+        {"$group": {
+            "_id": "$backup_status",
+            "count": {"$sum": 1}
+        }}
+    ]
+    
+    backup_results = list(db.files.aggregate(backup_pipeline))
+    backup_distribution = {}
+    for item in backup_results:
+        backup_distribution[item["_id"]] = item["count"]
+    
+    # Account distribution
+    account_pipeline = [
+        {"$match": {"storage_location": StorageLocation.GDRIVE, "status": UploadStatus.COMPLETED}},
+        {"$group": {
+            "_id": "$gdrive_account_id",
+            "count": {"$sum": 1},
+            "total_size": {"$sum": "$size_bytes"}
+        }},
+        {"$sort": {"count": -1}}
+    ]
+    
+    account_results = list(db.files.aggregate(account_pipeline))
+    account_distribution = []
+    for item in account_results:
+        account_distribution.append({
+            "account_id": item["_id"],
+            "count": item["count"],
+            "total_size": item["total_size"],
+            "size_formatted": format_file_size(item["total_size"])
+        })
+    
+    return {
+        "file_types": file_types,
+        "total_files": total_files,
+        "backup_distribution": backup_distribution,
+        "account_distribution": account_distribution
+    }
+
+# ================================
+# HETZNER FILE MANAGEMENT ENDPOINTS
+# ================================
+
+@router.get("/hetzner/files")
+async def list_hetzner_files(
+    request: Request,
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    search: Optional[str] = Query(None),
+    file_type: Optional[str] = Query(None),
+    size_min: Optional[int] = Query(None),
+    size_max: Optional[int] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    owner_email: Optional[str] = Query(None),
+    backup_status: Optional[str] = Query(None),
+    sort_by: Optional[str] = Query("upload_date"),
+    sort_order: Optional[str] = Query("desc"),
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """List files that are backed up to Hetzner storage"""
+    
+    # Build query for files backed up to Hetzner
+    query = {
+        "backup_status": BackupStatus.COMPLETED,
+        "backup_location": StorageLocation.HETZNER
+    }
+    
+    # Search filter - search in filename
+    if search:
+        query["filename"] = {"$regex": re.escape(search), "$options": "i"}
+    
+    # File type filter based on MIME type
+    if file_type:
+        type_patterns = {
+            "image": "^image/",
+            "video": "^video/", 
+            "document": "^(application/(pdf|msword|vnd\\.openxmlformats-officedocument)|text/)",
+            "archive": "^application/(zip|x-rar|x-7z|gzip|x-tar)",
+            "audio": "^audio/"
+        }
+        if file_type in type_patterns:
+            query["content_type"] = {"$regex": type_patterns[file_type]}
+    
+    # Size filters
+    if size_min is not None or size_max is not None:
+        size_query = {}
+        if size_min is not None:
+            size_query["$gte"] = size_min
+        if size_max is not None:
+            size_query["$lte"] = size_max
+        query["size_bytes"] = size_query
+    
+    # Date filters
+    if date_from or date_to:
+        date_query = {}
+        if date_from:
+            try:
+                date_from_obj = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
+                date_query["$gte"] = date_from_obj
+            except ValueError:
+                pass
+        if date_to:
+            try:
+                date_to_obj = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
+                date_query["$lte"] = date_to_obj
+            except ValueError:
+                pass
+        if date_query:
+            query["upload_date"] = date_query
+    
+    # Owner filter
+    if owner_email:
+        query["owner_email"] = {"$regex": re.escape(owner_email), "$options": "i"}
+    
+    # Build sort
+    sort_field = sort_by if sort_by in ["filename", "size_bytes", "upload_date", "backup_status"] else "upload_date"
+    sort_direction = 1 if sort_order == "asc" else -1
+    sort = [(sort_field, sort_direction)]
+    
+    # Get total count
+    total_files = db.files.count_documents(query)
+    
+    # Calculate pagination
+    skip = (page - 1) * limit
+    total_pages = (total_files + limit - 1) // limit
+    
+    # Get files
+    files_cursor = db.files.find(query).sort(sort).skip(skip).limit(limit)
+    files = []
+    
+    for file_doc in files_cursor:
+        file_doc["_id"] = str(file_doc["_id"])
+        file_doc["size_formatted"] = format_file_size(file_doc.get("size_bytes", 0))
+        files.append(file_doc)
+    
+    # Get hetzner-specific statistics
+    hetzner_stats = {
+        "total_files": db.files.count_documents({"backup_status": BackupStatus.COMPLETED, "backup_location": StorageLocation.HETZNER}),
+        "total_storage": 0,
+        "total_storage_formatted": "0 B",
+        "recent_backups": db.files.count_documents({
+            "backup_status": BackupStatus.COMPLETED, 
+            "backup_location": StorageLocation.HETZNER,
+            "upload_date": {"$gte": datetime.utcnow() - timedelta(days=7)}
+        }),
+        "failed_backups": db.files.count_documents({"backup_status": BackupStatus.FAILED})
+    }
+    
+    # Calculate total storage
+    storage_pipeline = [
+        {"$match": {"backup_status": BackupStatus.COMPLETED, "backup_location": StorageLocation.HETZNER}},
+        {"$group": {"_id": None, "total_size": {"$sum": "$size_bytes"}}}
+    ]
+    storage_result = list(db.files.aggregate(storage_pipeline))
+    if storage_result:
+        hetzner_stats["total_storage"] = storage_result[0]["total_size"]
+        hetzner_stats["total_storage_formatted"] = format_file_size(storage_result[0]["total_size"])
+    
+    # Log admin activity
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action="list_hetzner_files",
+        details=f"Listed {len(files)} hetzner files (page {page})",
+        ip_address=get_client_ip(request),
+        endpoint="/api/v1/admin/hetzner/files"
+    )
+    
+    return {
+        "files": files,
+        "total": total_files,
+        "page": page,
+        "limit": limit,
+        "total_pages": total_pages,
+        "hetzner_stats": hetzner_stats
+    }
+
+@router.get("/hetzner/analytics")
+async def get_hetzner_analytics(
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Get analytics for Hetzner backup files"""
+    
+    # File type distribution
+    type_pipeline = [
+        {"$match": {"backup_status": BackupStatus.COMPLETED, "backup_location": StorageLocation.HETZNER}},
+        {"$group": {
+            "_id": "$file_type",
+            "count": {"$sum": 1},
+            "total_size": {"$sum": "$size_bytes"}
+        }},
+        {"$sort": {"count": -1}}
+    ]
+    
+    type_results = list(db.files.aggregate(type_pipeline))
+    total_files = sum(item["count"] for item in type_results)
+    
+    file_types = []
+    for item in type_results:
+        percentage = (item["count"] / total_files * 100) if total_files > 0 else 0
+        file_types.append({
+            "_id": item["_id"] or "unknown",
+            "count": item["count"],
+            "total_size": item["total_size"],
+            "size_formatted": format_file_size(item["total_size"]),
+            "percentage": percentage
+        })
+    
+    # Backup timeline (last 30 days)
+    timeline_pipeline = [
+        {"$match": {
+            "backup_status": BackupStatus.COMPLETED, 
+            "backup_location": StorageLocation.HETZNER,
+            "upload_date": {"$gte": datetime.utcnow() - timedelta(days=30)}
+        }},
+        {"$group": {
+            "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$upload_date"}},
+            "count": {"$sum": 1},
+            "total_size": {"$sum": "$size_bytes"}
+        }},
+        {"$sort": {"_id": 1}}
+    ]
+    
+    timeline_results = list(db.files.aggregate(timeline_pipeline))
+    backup_timeline = []
+    for item in timeline_results:
+        backup_timeline.append({
+            "date": item["_id"],
+            "count": item["count"],
+            "total_size": item["total_size"],
+            "size_formatted": format_file_size(item["total_size"])
+        })
+    
+    # Source account distribution
+    account_pipeline = [
+        {"$match": {"backup_status": BackupStatus.COMPLETED, "backup_location": StorageLocation.HETZNER}},
+        {"$group": {
+            "_id": "$gdrive_account_id",
+            "count": {"$sum": 1},
+            "total_size": {"$sum": "$size_bytes"}
+        }},
+        {"$sort": {"count": -1}}
+    ]
+    
+    account_results = list(db.files.aggregate(account_pipeline))
+    account_distribution = []
+    for item in account_results:
+        account_distribution.append({
+            "account_id": item["_id"],
+            "count": item["count"],
+            "total_size": item["total_size"],
+            "size_formatted": format_file_size(item["total_size"])
+        })
+    
+    return {
+        "file_types": file_types,
+        "total_files": total_files,
+        "backup_timeline": backup_timeline,
+        "account_distribution": account_distribution
+    }
+
+# ================================
+>>>>>>> f4653ea65be7a6fc77b03642a080c0a3e6cff49d
 # BACKUP MANAGEMENT ENDPOINTS
 # ================================
 
@@ -1680,4 +2119,160 @@ async def backup_cleanup(
         "message": "Backup cleanup completed",
         "reset_failed_backups": reset_result.modified_count,
         "cleaned_stuck_backups": orphaned_count
+<<<<<<< HEAD
     }
+=======
+    }
+
+# ================================
+# GOOGLE DRIVE DELETE ENDPOINT
+# ================================
+
+@router.delete("/drive/files/{file_id}")
+async def delete_drive_file(
+    file_id: str,
+    request: Request,
+    reason: Optional[str] = Query(None),
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Delete a file from Google Drive storage"""
+    
+    try:
+        # Validate file ID
+        if not ObjectId.is_valid(file_id):
+            raise HTTPException(status_code=400, detail="Invalid file ID")
+        
+        # Find the file
+        file_doc = db.files.find_one({"_id": ObjectId(file_id)})
+        if not file_doc:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Check if file is in Google Drive
+        if file_doc.get("storage_location") != StorageLocation.GDRIVE:
+            raise HTTPException(status_code=400, detail="File is not stored in Google Drive")
+        
+        # Check if file is backed up to Hetzner (only allow deletion if backed up)
+        if file_doc.get("backup_status") != BackupStatus.COMPLETED:
+            raise HTTPException(
+                status_code=400, 
+                detail="Cannot delete file from Google Drive until it's backed up to Hetzner"
+            )
+        
+        gdrive_id = file_doc.get("gdrive_id")
+        if not gdrive_id:
+            raise HTTPException(status_code=400, detail="File has no Google Drive ID")
+        
+        # Import Google Drive service
+        from app.services.google_drive_service import gdrive_pool_manager
+        
+        # Delete from Google Drive
+        try:
+            await gdrive_pool_manager.delete_file(gdrive_id)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to delete from Google Drive: {str(e)}")
+        
+        # Update file status in database
+        update_data = {
+            "storage_location": None,
+            "gdrive_id": None,
+            "gdrive_account_id": None,
+            "status": UploadStatus.FAILED
+        }
+        
+        db.files.update_one(
+            {"_id": ObjectId(file_id)},
+            {"$set": update_data}
+        )
+        
+        # Log admin activity
+        await log_admin_activity(
+            admin_email=current_admin.email,
+            action="delete_drive_file",
+            details=f"Deleted file {file_doc.get('filename')} from Google Drive. Reason: {reason or 'No reason provided'}",
+            ip_address=get_client_ip(request),
+            endpoint=f"/api/v1/admin/drive/files/{file_id}"
+        )
+        
+        return {
+            "message": "File deleted from Google Drive successfully",
+            "file_id": file_id,
+            "filename": file_doc.get("filename")
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+# ================================
+# HETZNER DELETE ENDPOINT
+# ================================
+
+@router.delete("/hetzner/files/{file_id}")
+async def delete_hetzner_file(
+    file_id: str,
+    request: Request,
+    reason: Optional[str] = Query(None),
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Delete a file from Hetzner storage"""
+    
+    try:
+        # Validate file ID
+        if not ObjectId.is_valid(file_id):
+            raise HTTPException(status_code=400, detail="Invalid file ID")
+        
+        # Find the file
+        file_doc = db.files.find_one({"_id": ObjectId(file_id)})
+        if not file_doc:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Check if file is backed up to Hetzner
+        if file_doc.get("backup_status") != BackupStatus.COMPLETED or file_doc.get("backup_location") != StorageLocation.HETZNER:
+            raise HTTPException(status_code=400, detail="File is not backed up to Hetzner")
+        
+        hetzner_path = file_doc.get("hetzner_remote_path")
+        if not hetzner_path:
+            raise HTTPException(status_code=400, detail="File has no Hetzner path")
+        
+        # Import Hetzner service
+        from app.services.hetzner_service import hetzner_storage_manager
+        
+        # Delete from Hetzner
+        try:
+            await hetzner_storage_manager.delete_file(hetzner_path)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to delete from Hetzner: {str(e)}")
+        
+        # Update file status in database
+        update_data = {
+            "backup_status": BackupStatus.NONE,
+            "backup_location": None,
+            "hetzner_remote_path": None
+        }
+        
+        db.files.update_one(
+            {"_id": ObjectId(file_id)},
+            {"$set": update_data}
+        )
+        
+        # Log admin activity
+        await log_admin_activity(
+            admin_email=current_admin.email,
+            action="delete_hetzner_file",
+            details=f"Deleted file {file_doc.get('filename')} from Hetzner. Reason: {reason or 'No reason provided'}",
+            ip_address=get_client_ip(request),
+            endpoint=f"/api/v1/admin/hetzner/files/{file_id}"
+        )
+        
+        return {
+            "message": "File deleted from Hetzner successfully",
+            "file_id": file_id,
+            "filename": file_doc.get("filename")
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+>>>>>>> f4653ea65be7a6fc77b03642a080c0a3e6cff49d

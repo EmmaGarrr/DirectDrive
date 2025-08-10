@@ -731,222 +731,125 @@
 
 
 
+
 # # # In file: Backend/app/services/hetzner_service.py
 
-# # import asyncio
-# # import httpx
-# # import uuid
-# # import traceback
+# # # import asyncio
+# # # import httpx
+# # # import uuid
+# # # import traceback
 
-# # from app.core.config import settings
-# # from app.db.mongodb import db
-# # from app.models.file import BackupStatus, StorageLocation
-# # from app.services import google_drive_service
+# # # from app.core.config import settings
+# # # from app.db.mongodb import db
+# # # from app.models.file import BackupStatus, StorageLocation
+# # # from app.services import google_drive_service
 
-# # async def transfer_gdrive_to_hetzner(file_id: str):
-# #     """
-# #     This is the final, production-ready version with an extended timeout
-# #     for large file transfers.
-# #     """
-# #     if not all([settings.HETZNER_WEBDAV_URL, settings.HETZNER_USERNAME, settings.HETZNER_PASSWORD]):
-# #         print("!!! [HETZNER_BACKUP] CRITICAL ERROR: Hetzner credentials are not configured in the .env file.")
-# #         db.files.update_one({"_id": file_id}, {"$set": {"backup_status": BackupStatus.FAILED}})
-# #         return
+# # # # --- NEW: PRODUCER-CONSUMER ARCHITECTURE ---
 
-# #     print(f"[HETZNER_BACKUP] Starting backup task for file_id: {file_id}")
+# # # async def producer(queue: asyncio.Queue, gdrive_id: str, account):
+# # #     """
+# # #     The Producer's only job is to download chunks from Google Drive
+# # #     and put them into the shared queue.
+# # #     """
+# # #     try:
+# # #         print("[PRODUCER] Starting download from Google Drive...")
+# # #         async for chunk in google_drive_service.async_stream_gdrive_file(gdrive_id, account=account):
+# # #             await queue.put(chunk)
+# # #         print("[PRODUCER] Finished downloading. Placing sentinel in queue.")
+# # #         await queue.put(None)  # Sentinel value to signal the end
+# # #     except Exception as e:
+# # #         print(f"!!! [PRODUCER] Error during download: {e}")
+# # #         await queue.put(None) # Ensure consumer doesn't wait forever on error
+# # #         raise # Re-raise the exception to be caught by the main task
+
+# # # async def consumer(queue: asyncio.Queue):
+# # #     """
+# # #     The Consumer's only job is to get chunks from the shared queue
+# # #     and yield them to the uploader.
+# # #     """
+# # #     while True:
+# # #         chunk = await queue.get()
+# # #         if chunk is None:
+# # #             print("[CONSUMER] Sentinel received. Ending upload stream.")
+# # #             break
+# # #         yield chunk
+# # #         queue.task_done()
+
+# # # async def transfer_gdrive_to_hetzner(file_id: str):
+# # #     """
+# # #     This is the final, production-ready version using a decoupled
+# # #     Producer-Consumer pattern to ensure stability with large files.
+# # #     """
+# # #     if not all([settings.HETZNER_WEBDAV_URL, settings.HETZNER_USERNAME, settings.HETZNER_PASSWORD]):
+# # #         print("!!! [HETZNER_BACKUP] CRITICAL ERROR: Hetzner credentials are not configured in the .env file.")
+# # #         db.files.update_one({"_id": file_id}, {"$set": {"backup_status": BackupStatus.FAILED}})
+# # #         return
+
+# # #     print(f"[HETZNER_BACKUP] Starting backup task for file_id: {file_id}")
     
-# #     try:
-# #         file_doc = db.files.find_one({"_id": file_id})
-# #         if not file_doc:
-# #             print(f"!!! [HETZNER_BACKUP] File {file_id} not found in DB. Aborting.")
-# #             return
+# # #     try:
+# # #         file_doc = db.files.find_one({"_id": file_id})
+# # #         if not file_doc:
+# # #             print(f"!!! [HETZNER_BACKUP] File {file_id} not found in DB. Aborting.")
+# # #             return
 
-# #         db.files.update_one({"_id": file_id}, {"$set": {"backup_status": BackupStatus.IN_PROGRESS}})
+# # #         db.files.update_one({"_id": file_id}, {"$set": {"backup_status": BackupStatus.IN_PROGRESS}})
 
-# #         gdrive_id = file_doc.get("gdrive_id")
-# #         gdrive_account_id = file_doc.get("gdrive_account_id")
+# # #         gdrive_id = file_doc.get("gdrive_id")
+# # #         gdrive_account_id = file_doc.get("gdrive_account_id")
 
-# #         if not gdrive_id or not gdrive_account_id:
-# #             raise ValueError("Missing gdrive_id or gdrive_account_id in file metadata.")
+# # #         if not gdrive_id or not gdrive_account_id:
+# # #             raise ValueError("Missing gdrive_id or gdrive_account_id in file metadata.")
             
-# #         source_gdrive_account = google_drive_service.gdrive_pool_manager.get_account_by_id(gdrive_account_id)
-# #         if not source_gdrive_account:
-# #             raise ValueError(f"Could not find configuration for Google account: {gdrive_account_id}")
+# # #         source_gdrive_account = google_drive_service.gdrive_pool_manager.get_account_by_id(gdrive_account_id)
+# # #         if not source_gdrive_account:
+# # #             raise ValueError(f"Could not find configuration for Google account: {gdrive_account_id}")
 
-# #         remote_path = f"{file_id}/{file_doc.get('filename')}"
-# #         auth = (settings.HETZNER_USERNAME, settings.HETZNER_PASSWORD)
+# # #         # Create the shared queue (the "holding tank")
+# # #         # A maxsize prevents the downloader from getting too far ahead and using too much RAM.
+# # #         queue = asyncio.Queue(maxsize=5)
 
-# #         # Step 1 - Create the parent directory
-# #         directory_url = f"{settings.HETZNER_WEBDAV_URL}/{file_id}"
-# #         async with httpx.AsyncClient(auth=auth) as client:
-# #             response = await client.request("MKCOL", directory_url)
-# #             if response.status_code not in [201, 405]: # 201=Created, 405=Already Exists
-# #                 response.raise_for_status()
+# # #         # Create the producer task to start downloading in the background.
+# # #         producer_task = asyncio.create_task(
+# # #             producer(queue, gdrive_id, source_gdrive_account)
+# # #         )
         
-# #         # The generator for streaming data from Google Drive
-# #         async def stream_generator():
-# #             async for chunk in google_drive_service.async_stream_gdrive_file(gdrive_id, account=source_gdrive_account):
-# #                 if chunk:
-# #                     yield chunk
+# # #         # Prepare the Hetzner upload details
+# # #         remote_path = f"{file_id}/{file_doc.get('filename')}"
+# # #         auth = (settings.HETZNER_USERNAME, settings.HETZNER_PASSWORD)
+# # #         file_size = file_doc.get("size_bytes", 0)
+# # #         headers = {'Content-Length': str(file_size)}
+# # #         timeout = 1800.0  # 30 minutes
 
-# #         # Get the file's exact size from the database.
-# #         file_size = file_doc.get("size_bytes", 0)
-# #         headers = {'Content-Length': str(file_size)}
+# # #         # Create the directory on Hetzner
+# # #         directory_url = f"{settings.HETZNER_WEBDAV_URL}/{file_id}"
+# # #         async with httpx.AsyncClient(auth=auth) as client:
+# # #             mkcol_response = await client.request("MKCOL", directory_url)
+# # #             if mkcol_response.status_code not in [201, 405]:
+# # #                 mkcol_response.raise_for_status()
         
-# #         # --- FINAL FIX: A GENEROUS, GLOBAL TIMEOUT ---
-# #         # Set a 30-minute (1800 seconds) timeout for the entire request.
-# #         # This gives ample time for large files to be transferred and processed.
-# #         timeout = 1800.0
-# #         # --- END OF FINAL FIX ---
-        
-# #         # Step 2 - Upload the file into the directory
-# #         file_upload_url = f"{settings.HETZNER_WEBDAV_URL}/{remote_path}"
-# #         async with httpx.AsyncClient(auth=auth, timeout=timeout) as client:
-# #             print(f"[HETZNER_BACKUP] Streaming file to: {file_upload_url} with Content-Length: {file_size}")
-# #             response = await client.put(file_upload_url, content=stream_generator(), headers=headers)
-# #             response.raise_for_status()
+# # #         # Start the upload, consuming from the queue
+# # #         file_upload_url = f"{settings.HETZNER_WEBDAV_URL}/{remote_path}"
+# # #         async with httpx.AsyncClient(auth=auth, timeout=timeout) as client:
+# # #             print(f"[HETZNER_BACKUP] Starting upload to Hetzner from consumer...")
+# # #             response = await client.put(file_upload_url, content=consumer(queue), headers=headers)
+# # #             response.raise_for_status()
 
-# #         print(f"[HETZNER_BACKUP] Successfully transferred file {file_id} to Hetzner.")
+# # #         # Wait for the producer task to finish and check for errors
+# # #         await producer_task
 
-# #         # Final DB update
-# #         db.files.update_one(
-# #             {"_id": file_id},
-# #             {"$set": {
-# #                 "backup_status": BackupStatus.COMPLETED,
-# #                 "backup_location": StorageLocation.HETZNER,
-# #                 "hetzner_remote_path": remote_path
-# #             }}
-# #         )
+# # #         print(f"[HETZNER_BACKUP] Successfully transferred file {file_id} to Hetzner.")
 
-# #     except Exception as e:
-# #         print(f"!!! [HETZNER_BACKUP] An exception occurred for file_id {file_id}. Reason: {e}")
-# #         traceback.print_exc()
-# #         db.files.update_one(
-# #             {"_id": file_id},
-# #             {"$set": {"backup_status": BackupStatus.FAILED}}
-# #         )
+# # #         # Final DB update
+# # #         db.files.update_one({"_id": file_id}, {"$set": {"backup_status": BackupStatus.COMPLETED, "backup_location": StorageLocation.HETZNER, "hetzner_remote_path": remote_path}})
 
-
+# # #     except Exception as e:
+# # #         print(f"!!! [HETZNER_BACKUP] An exception occurred for file_id {file_id}. Reason: {e}")
+# # #         traceback.print_exc()
+# # #         db.files.update_one({"_id": file_id}, {"$set": {"backup_status": BackupStatus.FAILED}})
 
 
 # # In file: Backend/app/services/hetzner_service.py
-
-# import asyncio
-# import httpx
-# import uuid
-# import traceback
-
-# from app.core.config import settings
-# from app.db.mongodb import db
-# from app.models.file import BackupStatus, StorageLocation
-# from app.services import google_drive_service
-
-# # --- NEW: PRODUCER-CONSUMER ARCHITECTURE ---
-
-# async def producer(queue: asyncio.Queue, gdrive_id: str, account):
-#     """
-#     The Producer's only job is to download chunks from Google Drive
-#     and put them into the shared queue.
-#     """
-#     try:
-#         print("[PRODUCER] Starting download from Google Drive...")
-#         async for chunk in google_drive_service.async_stream_gdrive_file(gdrive_id, account=account):
-#             await queue.put(chunk)
-#         print("[PRODUCER] Finished downloading. Placing sentinel in queue.")
-#         await queue.put(None)  # Sentinel value to signal the end
-#     except Exception as e:
-#         print(f"!!! [PRODUCER] Error during download: {e}")
-#         await queue.put(None) # Ensure consumer doesn't wait forever on error
-#         raise # Re-raise the exception to be caught by the main task
-
-# async def consumer(queue: asyncio.Queue):
-#     """
-#     The Consumer's only job is to get chunks from the shared queue
-#     and yield them to the uploader.
-#     """
-#     while True:
-#         chunk = await queue.get()
-#         if chunk is None:
-#             print("[CONSUMER] Sentinel received. Ending upload stream.")
-#             break
-#         yield chunk
-#         queue.task_done()
-
-# async def transfer_gdrive_to_hetzner(file_id: str):
-#     """
-#     This is the final, production-ready version using a decoupled
-#     Producer-Consumer pattern to ensure stability with large files.
-#     """
-#     if not all([settings.HETZNER_WEBDAV_URL, settings.HETZNER_USERNAME, settings.HETZNER_PASSWORD]):
-#         print("!!! [HETZNER_BACKUP] CRITICAL ERROR: Hetzner credentials are not configured in the .env file.")
-#         db.files.update_one({"_id": file_id}, {"$set": {"backup_status": BackupStatus.FAILED}})
-#         return
-
-#     print(f"[HETZNER_BACKUP] Starting backup task for file_id: {file_id}")
-    
-#     try:
-#         file_doc = db.files.find_one({"_id": file_id})
-#         if not file_doc:
-#             print(f"!!! [HETZNER_BACKUP] File {file_id} not found in DB. Aborting.")
-#             return
-
-#         db.files.update_one({"_id": file_id}, {"$set": {"backup_status": BackupStatus.IN_PROGRESS}})
-
-#         gdrive_id = file_doc.get("gdrive_id")
-#         gdrive_account_id = file_doc.get("gdrive_account_id")
-
-#         if not gdrive_id or not gdrive_account_id:
-#             raise ValueError("Missing gdrive_id or gdrive_account_id in file metadata.")
-            
-#         source_gdrive_account = google_drive_service.gdrive_pool_manager.get_account_by_id(gdrive_account_id)
-#         if not source_gdrive_account:
-#             raise ValueError(f"Could not find configuration for Google account: {gdrive_account_id}")
-
-#         # Create the shared queue (the "holding tank")
-#         # A maxsize prevents the downloader from getting too far ahead and using too much RAM.
-#         queue = asyncio.Queue(maxsize=5)
-
-#         # Create the producer task to start downloading in the background.
-#         producer_task = asyncio.create_task(
-#             producer(queue, gdrive_id, source_gdrive_account)
-#         )
-        
-#         # Prepare the Hetzner upload details
-#         remote_path = f"{file_id}/{file_doc.get('filename')}"
-#         auth = (settings.HETZNER_USERNAME, settings.HETZNER_PASSWORD)
-#         file_size = file_doc.get("size_bytes", 0)
-#         headers = {'Content-Length': str(file_size)}
-#         timeout = 1800.0  # 30 minutes
-
-#         # Create the directory on Hetzner
-#         directory_url = f"{settings.HETZNER_WEBDAV_URL}/{file_id}"
-#         async with httpx.AsyncClient(auth=auth) as client:
-#             mkcol_response = await client.request("MKCOL", directory_url)
-#             if mkcol_response.status_code not in [201, 405]:
-#                 mkcol_response.raise_for_status()
-        
-#         # Start the upload, consuming from the queue
-#         file_upload_url = f"{settings.HETZNER_WEBDAV_URL}/{remote_path}"
-#         async with httpx.AsyncClient(auth=auth, timeout=timeout) as client:
-#             print(f"[HETZNER_BACKUP] Starting upload to Hetzner from consumer...")
-#             response = await client.put(file_upload_url, content=consumer(queue), headers=headers)
-#             response.raise_for_status()
-
-#         # Wait for the producer task to finish and check for errors
-#         await producer_task
-
-#         print(f"[HETZNER_BACKUP] Successfully transferred file {file_id} to Hetzner.")
-
-#         # Final DB update
-#         db.files.update_one({"_id": file_id}, {"$set": {"backup_status": BackupStatus.COMPLETED, "backup_location": StorageLocation.HETZNER, "hetzner_remote_path": remote_path}})
-
-#     except Exception as e:
-#         print(f"!!! [HETZNER_BACKUP] An exception occurred for file_id {file_id}. Reason: {e}")
-#         traceback.print_exc()
-#         db.files.update_one({"_id": file_id}, {"$set": {"backup_status": BackupStatus.FAILED}})
-
-
-# In file: Backend/app/services/hetzner_service.py
 
 import asyncio
 import httpx
@@ -1046,3 +949,41 @@ async def transfer_gdrive_to_hetzner(file_id: str):
         print(f"!!! [HETZNER_BACKUP] An exception occurred for file_id {file_id}. Reason: {e}")
         traceback.print_exc()
         db.files.update_one({"_id": file_id}, {"$set": {"backup_status": BackupStatus.FAILED}})
+
+# ================================
+# HETZNER STORAGE MANAGER
+# ================================
+
+class HetznerStorageManager:
+    def __init__(self):
+        self.webdav_url = settings.HETZNER_WEBDAV_URL
+        self.username = settings.HETZNER_USERNAME
+        self.password = settings.HETZNER_PASSWORD
+        self.auth = (self.username, self.password)
+    
+    async def delete_file(self, remote_path: str) -> bool:
+        """Delete a file from Hetzner storage"""
+        try:
+            if not all([self.webdav_url, self.username, self.password]):
+                raise Exception("Hetzner credentials are not configured")
+            
+            file_url = f"{self.webdav_url}/{remote_path}"
+            
+            async with httpx.AsyncClient(auth=self.auth) as client:
+                response = await client.delete(file_url)
+                
+                if response.status_code == 404:
+                    print(f"[HETZNER_DELETE] File {remote_path} not found (already deleted)")
+                    return True
+                elif response.status_code == 204:
+                    print(f"[HETZNER_DELETE] Successfully deleted file {remote_path}")
+                    return True
+                else:
+                    response.raise_for_status()
+                    
+        except Exception as e:
+            print(f"!!! [HETZNER_DELETE] Error deleting file {remote_path}: {e}")
+            raise e
+
+# Create singleton instance
+hetzner_storage_manager = HetznerStorageManager()
