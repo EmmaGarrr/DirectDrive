@@ -411,7 +411,7 @@ async def bulk_file_action(
             "archived_at": datetime.utcnow(),
             "archived_by": current_admin.email,
             "archive_reason": action_data.reason,
-            "storage_location": StorageLocation.ARCHIVED,
+            # DO NOT change storage_location - keep it as original
             "status": UploadStatus.ARCHIVED
         })
         action_msg = "archived"
@@ -1524,8 +1524,8 @@ async def list_drive_files(
     
     # Build query for files stored on Google Drive
     query = {
-        "storage_location": StorageLocation.GDRIVE,
-        "status": UploadStatus.COMPLETED
+        "storage_location": StorageLocation.GDRIVE
+        # Include ALL files (completed, archived, quarantined) - let frontend handle visibility
     }
     
     # Search filter - search in filename
@@ -1750,6 +1750,7 @@ async def list_hetzner_files(
     query = {
         "backup_status": BackupStatus.COMPLETED,
         "backup_location": StorageLocation.HETZNER
+        # Include ALL files (completed, archived, quarantined) - let frontend handle visibility
     }
     
     # Search filter - search in filename
@@ -3037,14 +3038,14 @@ async def archive_file(
     # Store original location before archiving
     original_location = file_doc.get("storage_location")
     
-    # Update file to archived status
+    # Update file to archived status - DO NOT change storage_location
     update_doc = {
         "archived": True,
         "archived_at": datetime.utcnow(),
         "archived_by": current_admin.email,
         "archive_reason": archive_data.reason,
         "original_storage_location": original_location,
-        "storage_location": StorageLocation.ARCHIVED,
+        # DO NOT change storage_location - keep it as original
         "status": UploadStatus.ARCHIVED,
         "updated_at": datetime.utcnow()
     }
@@ -3100,8 +3101,8 @@ async def restore_file(
             detail="File is not archived"
         )
     
-    # Restore to original location
-    original_location = file_doc.get("original_storage_location", StorageLocation.GDRIVE)
+    # Get the current storage location (should be the original one)
+    current_location = file_doc.get("storage_location")
     
     # Update file to restore it
     update_doc = {
@@ -3110,7 +3111,7 @@ async def restore_file(
         "archived_by": None,
         "archive_reason": None,
         "original_storage_location": None,
-        "storage_location": original_location,
+        # Keep the current storage_location (it should be the original one)
         "status": UploadStatus.COMPLETED,
         "updated_at": datetime.utcnow()
     }
@@ -3121,7 +3122,7 @@ async def restore_file(
         performed_by=current_admin.email,
         performed_at=datetime.utcnow(),
         reason=restore_data.reason,
-        details=f"File restored to {original_location}",
+        details=f"File restored to {current_location}",
         ip_address=get_client_ip(request)
     )
     
@@ -3142,7 +3143,7 @@ async def restore_file(
         endpoint=f"/api/v1/admin/files/{file_id}/restore"
     )
     
-    return {"message": "File restored successfully", "restored_to": original_location}
+    return {"message": "File restored successfully", "restored_to": current_location}
 
 @router.get("/files/archived")
 async def list_archived_files(
@@ -3160,20 +3161,28 @@ async def list_archived_files(
     sort_order: Optional[str] = Query("desc"),
     current_admin: AdminUserInDB = Depends(get_current_admin)
 ):
-    """Get list of archived files"""
+    """List all archived files with pagination and filtering"""
     
     # Build query for archived files
     query = {"archived": True}
     
-    # Add search filter
+    # Search filter - search in filename
     if search:
-        query["filename"] = {"$regex": search, "$options": "i"}
+        query["filename"] = {"$regex": re.escape(search), "$options": "i"}
     
-    # Add file type filter
+    # File type filter based on MIME type
     if file_type:
-        query["file_type"] = file_type
+        type_patterns = {
+            "image": "^image/",
+            "video": "^video/", 
+            "document": "^(application/(pdf|msword|vnd\\.openxmlformats-officedocument)|text/)",
+            "archive": "^application/(zip|x-rar|x-7z|gzip|x-tar)",
+            "audio": "^audio/"
+        }
+        if file_type in type_patterns:
+            query["content_type"] = {"$regex": type_patterns[file_type]}
     
-    # Add size filters
+    # Size filters
     if size_min is not None or size_max is not None:
         size_query = {}
         if size_min is not None:
@@ -3182,42 +3191,47 @@ async def list_archived_files(
             size_query["$lte"] = size_max
         query["size_bytes"] = size_query
     
-    # Add date filters
-    if date_from:
-        try:
-            from_date = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
-            query["archived_at"] = {"$gte": from_date}
-        except ValueError:
-            pass
+    # Date filters (for archived_at)
+    if date_from or date_to:
+        date_query = {}
+        if date_from:
+            try:
+                date_from_obj = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
+                date_query["$gte"] = date_from_obj
+            except ValueError:
+                pass
+        if date_to:
+            try:
+                date_to_obj = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
+                date_query["$lte"] = date_to_obj
+            except ValueError:
+                pass
+        if date_query:
+            query["archived_at"] = date_query
     
-    if date_to:
-        try:
-            to_date = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
-            if "archived_at" in query:
-                query["archived_at"]["$lte"] = to_date
-            else:
-                query["archived_at"] = {"$lte": to_date}
-        except ValueError:
-            pass
-    
-    # Add owner filter
+    # Owner filter
     if owner_email:
+        # Get user by email
         user = db.users.find_one({"email": owner_email})
         if user:
             query["owner_id"] = user["_id"]
     
     # Build sort
-    sort_field = sort_by if sort_by in ["archived_at", "filename", "size_bytes", "upload_date"] else "archived_at"
-    sort_direction = -1 if sort_order == "desc" else 1
+    sort_field = sort_by if sort_by in ["filename", "size_bytes", "archived_at", "storage_location"] else "archived_at"
+    sort_direction = 1 if sort_order == "asc" else -1
+    sort = [(sort_field, sort_direction)]
     
     # Get total count
-    total = db.files.count_documents(query)
+    total_files = db.files.count_documents(query)
     
-    # Get files with pagination
+    # Calculate pagination
     skip = (page - 1) * limit
-    files_cursor = db.files.find(query).sort(sort_field, sort_direction).skip(skip).limit(limit)
+    total_pages = (total_files + limit - 1) // limit
     
+    # Get files
+    files_cursor = db.files.find(query).sort(sort).skip(skip).limit(limit)
     files = []
+    
     for file_doc in files_cursor:
         file_doc["_id"] = str(file_doc["_id"])
         file_doc["size_formatted"] = format_file_size(file_doc.get("size_bytes", 0))
@@ -3231,11 +3245,232 @@ async def list_archived_files(
         
         files.append(file_doc)
     
-    total_pages = (total + limit - 1) // limit
+    return {
+        "files": files,
+        "total": total_files,
+        "page": page,
+        "limit": limit,
+        "total_pages": total_pages
+    }
+
+@router.get("/drive/files/archived")
+async def list_drive_archived_files(
+    request: Request,
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    search: Optional[str] = Query(None),
+    file_type: Optional[str] = Query(None),
+    size_min: Optional[int] = Query(None),
+    size_max: Optional[int] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    owner_email: Optional[str] = Query(None),
+    sort_by: Optional[str] = Query("archived_at"),
+    sort_order: Optional[str] = Query("desc"),
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """List archived files that were originally stored on Google Drive"""
+    
+    # Build query for archived files from Google Drive
+    query = {
+        "archived": True,
+        "storage_location": StorageLocation.GDRIVE
+    }
+    
+    # Search filter - search in filename
+    if search:
+        query["filename"] = {"$regex": re.escape(search), "$options": "i"}
+    
+    # File type filter based on MIME type
+    if file_type:
+        type_patterns = {
+            "image": "^image/",
+            "video": "^video/", 
+            "document": "^(application/(pdf|msword|vnd\\.openxmlformats-officedocument)|text/)",
+            "archive": "^application/(zip|x-rar|x-7z|gzip|x-tar)",
+            "audio": "^audio/"
+        }
+        if file_type in type_patterns:
+            query["content_type"] = {"$regex": type_patterns[file_type]}
+    
+    # Size filters
+    if size_min is not None or size_max is not None:
+        size_query = {}
+        if size_min is not None:
+            size_query["$gte"] = size_min
+        if size_max is not None:
+            size_query["$lte"] = size_max
+        query["size_bytes"] = size_query
+    
+    # Date filters (for archived_at)
+    if date_from or date_to:
+        date_query = {}
+        if date_from:
+            try:
+                date_from_obj = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
+                date_query["$gte"] = date_from_obj
+            except ValueError:
+                pass
+        if date_to:
+            try:
+                date_to_obj = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
+                date_query["$lte"] = date_to_obj
+            except ValueError:
+                pass
+        if date_query:
+            query["archived_at"] = date_query
+    
+    # Owner filter
+    if owner_email:
+        # Get user by email
+        user = db.users.find_one({"email": owner_email})
+        if user:
+            query["owner_id"] = user["_id"]
+    
+    # Build sort
+    sort_field = sort_by if sort_by in ["filename", "size_bytes", "archived_at"] else "archived_at"
+    sort_direction = 1 if sort_order == "asc" else -1
+    sort = [(sort_field, sort_direction)]
+    
+    # Get total count
+    total_files = db.files.count_documents(query)
+    
+    # Calculate pagination
+    skip = (page - 1) * limit
+    total_pages = (total_files + limit - 1) // limit
+    
+    # Get files
+    files_cursor = db.files.find(query).sort(sort).skip(skip).limit(limit)
+    files = []
+    
+    for file_doc in files_cursor:
+        file_doc["_id"] = str(file_doc["_id"])
+        file_doc["size_formatted"] = format_file_size(file_doc.get("size_bytes", 0))
+        
+        # Enrich files with owner information
+        if file_doc.get("owner_id"):
+            owner = db.users.find_one({"_id": file_doc["owner_id"]}, {"email": 1, "_id": 0})
+            file_doc["owner_email"] = owner["email"] if owner else "Unknown"
+        else:
+            file_doc["owner_email"] = "Anonymous"
+        
+        files.append(file_doc)
     
     return {
         "files": files,
-        "total": total,
+        "total": total_files,
+        "page": page,
+        "limit": limit,
+        "total_pages": total_pages
+    }
+
+@router.get("/hetzner/files/archived")
+async def list_hetzner_archived_files(
+    request: Request,
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    search: Optional[str] = Query(None),
+    file_type: Optional[str] = Query(None),
+    size_min: Optional[int] = Query(None),
+    size_max: Optional[int] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    owner_email: Optional[str] = Query(None),
+    sort_by: Optional[str] = Query("archived_at"),
+    sort_order: Optional[str] = Query("desc"),
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """List archived files that were originally backed up to Hetzner"""
+    
+    # Build query for archived files from Hetzner
+    query = {
+        "archived": True,
+        "backup_status": BackupStatus.COMPLETED,
+        "backup_location": StorageLocation.HETZNER
+    }
+    
+    # Search filter - search in filename
+    if search:
+        query["filename"] = {"$regex": re.escape(search), "$options": "i"}
+    
+    # File type filter based on MIME type
+    if file_type:
+        type_patterns = {
+            "image": "^image/",
+            "video": "^video/", 
+            "document": "^(application/(pdf|msword|vnd\\.openxmlformats-officedocument)|text/)",
+            "archive": "^application/(zip|x-rar|x-7z|gzip|x-tar)",
+            "audio": "^audio/"
+        }
+        if file_type in type_patterns:
+            query["content_type"] = {"$regex": type_patterns[file_type]}
+    
+    # Size filters
+    if size_min is not None or size_max is not None:
+        size_query = {}
+        if size_min is not None:
+            size_query["$gte"] = size_min
+        if size_max is not None:
+            size_query["$lte"] = size_max
+        query["size_bytes"] = size_query
+    
+    # Date filters (for archived_at)
+    if date_from or date_to:
+        date_query = {}
+        if date_from:
+            try:
+                date_from_obj = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
+                date_query["$gte"] = date_from_obj
+            except ValueError:
+                pass
+        if date_to:
+            try:
+                date_to_obj = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
+                date_query["$lte"] = date_to_obj
+            except ValueError:
+                pass
+        if date_query:
+            query["archived_at"] = date_query
+    
+    # Owner filter
+    if owner_email:
+        # Get user by email
+        user = db.users.find_one({"email": owner_email})
+        if user:
+            query["owner_id"] = user["_id"]
+    
+    # Build sort
+    sort_field = sort_by if sort_by in ["filename", "size_bytes", "archived_at"] else "archived_at"
+    sort_direction = 1 if sort_order == "asc" else -1
+    sort = [(sort_field, sort_direction)]
+    
+    # Get total count
+    total_files = db.files.count_documents(query)
+    
+    # Calculate pagination
+    skip = (page - 1) * limit
+    total_pages = (total_files + limit - 1) // limit
+    
+    # Get files
+    files_cursor = db.files.find(query).sort(sort).skip(skip).limit(limit)
+    files = []
+    
+    for file_doc in files_cursor:
+        file_doc["_id"] = str(file_doc["_id"])
+        file_doc["size_formatted"] = format_file_size(file_doc.get("size_bytes", 0))
+        
+        # Enrich files with owner information
+        if file_doc.get("owner_id"):
+            owner = db.users.find_one({"_id": file_doc["owner_id"]}, {"email": 1, "_id": 0})
+            file_doc["owner_email"] = owner["email"] if owner else "Unknown"
+        else:
+            file_doc["owner_email"] = "Anonymous"
+        
+        files.append(file_doc)
+    
+    return {
+        "files": files,
+        "total": total_files,
         "page": page,
         "limit": limit,
         "total_pages": total_pages
