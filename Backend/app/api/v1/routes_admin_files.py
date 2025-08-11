@@ -3,7 +3,11 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 from app.services.admin_auth_service import get_current_admin, log_admin_activity, get_client_ip
 from app.models.admin import AdminUserInDB
-from app.models.file import FileMetadataInDB, StorageLocation, UploadStatus, BackupStatus
+from app.models.file import (
+    FileMetadataInDB, StorageLocation, UploadStatus, BackupStatus, 
+    ActionHistory, ArchiveFileRequest, RestoreFileRequest, 
+    IntegrityCheckResult
+)
 from app.db.mongodb import db
 from app.services.google_drive_service import gdrive_pool_manager
 from pydantic import BaseModel
@@ -12,6 +16,8 @@ from bson import ObjectId
 import mimetypes
 import io
 import zipfile
+import hashlib
+import httpx
 
 router = APIRouter()
 
@@ -315,7 +321,7 @@ async def delete_file(
     reason: Optional[str] = Query(None),
     current_admin: AdminUserInDB = Depends(get_current_admin)
 ):
-    """Delete a file (admin only)"""
+    """Archive a file instead of deleting it permanently"""
     
     file_doc = db.files.find_one({"_id": file_id})
     if not file_doc:
@@ -324,27 +330,55 @@ async def delete_file(
             detail="File not found"
         )
     
-    # TODO: Implement actual file deletion from Google Drive/Hetzner
-    # For now, mark as deleted in database
+    if file_doc.get("archived"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File is already archived"
+        )
+    
+    # Store original location before archiving
+    original_location = file_doc.get("storage_location")
+    
+    # Update file to archived status
     update_doc = {
-        "status": "deleted",
-        "deleted_at": datetime.utcnow(),
-        "deleted_by": current_admin.email,
-        "deletion_reason": reason
+        "archived": True,
+        "archived_at": datetime.utcnow(),
+        "archived_by": current_admin.email,
+        "archive_reason": reason,
+        "original_storage_location": original_location,
+        "storage_location": StorageLocation.ARCHIVED,
+        "status": UploadStatus.ARCHIVED,
+        "updated_at": datetime.utcnow()
     }
     
-    db.files.update_one({"_id": file_id}, {"$set": update_doc})
+    # Add to action history
+    action_history = ActionHistory(
+        action="archive",
+        performed_by=current_admin.email,
+        performed_at=datetime.utcnow(),
+        reason=reason,
+        details=f"File archived from {original_location}",
+        ip_address=get_client_ip(request)
+    )
+    
+    db.files.update_one(
+        {"_id": file_id},
+        {
+            "$set": update_doc,
+            "$push": {"action_history": action_history.dict()}
+        }
+    )
     
     # Log admin activity
     await log_admin_activity(
         admin_email=current_admin.email,
-        action="delete_file",
-        details=f"Deleted file: {file_doc.get('filename', 'Unknown')} (ID: {file_id}). Reason: {reason or 'No reason provided'}",
+        action="archive_file",
+        details=f"Archived file: {file_doc.get('filename', 'Unknown')} (ID: {file_id}). Reason: {reason or 'No reason provided'}",
         ip_address=get_client_ip(request),
         endpoint=f"/api/v1/admin/files/{file_id}"
     )
     
-    return {"message": "File deleted successfully"}
+    return {"message": "File archived successfully", "archived_at": update_doc["archived_at"]}
 
 @router.post("/files/bulk-action")
 async def bulk_file_action(
@@ -373,18 +407,21 @@ async def bulk_file_action(
     
     if action_data.action == "delete":
         update_doc.update({
-            "status": "deleted",
-            "deleted_at": datetime.utcnow(),
-            "deleted_by": current_admin.email,
-            "deletion_reason": action_data.reason
+            "archived": True,
+            "archived_at": datetime.utcnow(),
+            "archived_by": current_admin.email,
+            "archive_reason": action_data.reason,
+            "storage_location": StorageLocation.ARCHIVED,
+            "status": UploadStatus.ARCHIVED
         })
-        action_msg = "deleted"
+        action_msg = "archived"
     elif action_data.action == "quarantine":
         update_doc.update({
             "quarantined": True,
             "quarantined_at": datetime.utcnow(),
             "quarantined_by": current_admin.email,
-            "quarantine_reason": action_data.reason
+            "quarantine_reason": action_data.reason,
+            "status": UploadStatus.QUARANTINED
         })
         action_msg = "quarantined"
     elif action_data.action == "backup":
@@ -632,58 +669,148 @@ async def move_file_between_accounts(file_id: str, file_doc: dict, operation_dat
     return {"message": "File moved successfully", "target_location": operation_data.target_location}
 
 async def check_file_integrity(file_id: str, file_doc: dict, current_admin: AdminUserInDB, request: Request):
-    """Check file integrity and corruption"""
+    """Check file integrity and corruption with real implementation"""
     
-    # TODO: Implement actual integrity checking
-    # For now, simulate the check
-    
-    import hashlib
-    integrity_result = {
-        "status": "verified",
-        "checksum_match": True,
-        "corruption_detected": False,
-        "file_accessible": True,
-        "last_check": datetime.utcnow(),
-        "check_performed_by": current_admin.email
-    }
-    
-    # Simulate random integrity issues for testing
-    file_hash = abs(hash(file_id)) % 100
-    if file_hash < 5:  # 5% chance of simulated corruption
-        integrity_result.update({
-            "status": "corrupted",
-            "checksum_match": False,
-            "corruption_detected": True,
-            "corruption_type": "checksum_mismatch"
-        })
-    elif file_hash < 10:  # Additional 5% chance of inaccessible file
-        integrity_result.update({
-            "status": "inaccessible",
-            "file_accessible": False,
-            "error": "File not found in storage location"
-        })
-    
-    # Update file record with integrity check results
-    db.files.update_one(
-        {"_id": file_id},
-        {
-            "$set": {
-                "last_integrity_check": datetime.utcnow(),
-                "integrity_status": integrity_result["status"]
+    try:
+        filename = file_doc.get("filename", "Unknown")
+        file_size = file_doc.get("size_bytes", 0)
+        
+        # Initialize integrity result
+        integrity_result = IntegrityCheckResult(
+            status="unknown",
+            checksum_match=False,
+            corruption_detected=False,
+            file_accessible=False,
+            last_check=datetime.utcnow(),
+            check_performed_by=current_admin.email,
+            details=""
+        )
+        
+        # Check if file is accessible based on storage location
+        storage_location = file_doc.get("storage_location")
+        
+        if storage_location == StorageLocation.GDRIVE:
+            # Check Google Drive file accessibility
+            gdrive_id = file_doc.get("gdrive_id")
+            account_id = file_doc.get("gdrive_account_id")
+            
+            if gdrive_id and account_id:
+                try:
+                    from app.services.google_drive_service import gdrive_pool_manager
+                    account = gdrive_pool_manager.get_account_by_id(account_id)
+                    if account:
+                        # Try to get file metadata from Google Drive
+                        service = gdrive_pool_manager._get_gdrive_service(account)
+                        file_metadata = service.files().get(fileId=gdrive_id).execute()
+                        
+                        # Check if file size matches
+                        gdrive_size = int(file_metadata.get("size", 0))
+                        if gdrive_size == file_size:
+                            integrity_result.file_accessible = True
+                            integrity_result.status = "verified"
+                            integrity_result.checksum_match = True
+                            integrity_result.details = "File accessible and size matches"
+                        else:
+                            integrity_result.status = "corrupted"
+                            integrity_result.corruption_detected = True
+                            integrity_result.details = f"Size mismatch: DB={file_size}, GDrive={gdrive_size}"
+                    else:
+                        integrity_result.details = "Google Drive account not found"
+                except Exception as e:
+                    integrity_result.status = "corrupted"
+                    integrity_result.corruption_detected = True
+                    integrity_result.details = f"Google Drive access error: {str(e)}"
+            else:
+                integrity_result.details = "Missing Google Drive file ID or account ID"
+        
+        elif storage_location == StorageLocation.HETZNER:
+            # Check Hetzner file accessibility
+            hetzner_path = file_doc.get("hetzner_remote_path")
+            
+            if hetzner_path:
+                try:
+                    from app.core.config import settings
+                    hetzner_url = f"{settings.HETZNER_WEBDAV_URL}/{hetzner_path}"
+                    auth = (settings.HETZNER_USERNAME, settings.HETZNER_PASSWORD)
+                    
+                    async with httpx.AsyncClient(auth=auth) as client:
+                        response = await client.head(hetzner_url)
+                        if response.status_code == 200:
+                            # Check if file size matches
+                            hetzner_size = int(response.headers.get("content-length", 0))
+                            if hetzner_size == file_size:
+                                integrity_result.file_accessible = True
+                                integrity_result.status = "verified"
+                                integrity_result.checksum_match = True
+                                integrity_result.details = "File accessible and size matches"
+                            else:
+                                integrity_result.status = "corrupted"
+                                integrity_result.corruption_detected = True
+                                integrity_result.details = f"Size mismatch: DB={file_size}, Hetzner={hetzner_size}"
+                        else:
+                            integrity_result.details = f"Hetzner file not accessible: {response.status_code}"
+                except Exception as e:
+                    integrity_result.status = "corrupted"
+                    integrity_result.corruption_detected = True
+                    integrity_result.details = f"Hetzner access error: {str(e)}"
+            else:
+                integrity_result.details = "Missing Hetzner file path"
+        
+        else:
+            integrity_result.details = f"Unknown storage location: {storage_location}"
+        
+        # Update file record with integrity check results
+        db.files.update_one(
+            {"_id": file_id},
+            {
+                "$set": {
+                    "last_integrity_check": integrity_result.last_check,
+                    "integrity_status": integrity_result.status
+                }
             }
-        }
-    )
-    
-    # Log admin activity
-    await log_admin_activity(
-        admin_email=current_admin.email,
-        action="check_file_integrity",
-        details=f"Integrity check for {file_doc.get('filename', 'Unknown')}: {integrity_result['status']}",
-        ip_address=get_client_ip(request),
-        endpoint=f"/api/v1/admin/files/{file_id}/operation"
-    )
-    
-    return {"integrity_check": integrity_result}
+        )
+        
+        # Add to action history
+        action_history = ActionHistory(
+            action="integrity_check",
+            performed_by=current_admin.email,
+            performed_at=datetime.utcnow(),
+            details=f"Integrity check result: {integrity_result.status}",
+            ip_address=get_client_ip(request)
+        )
+        
+        db.files.update_one(
+            {"_id": file_id},
+            {"$push": {"action_history": action_history.dict()}}
+        )
+        
+        # Log admin activity
+        await log_admin_activity(
+            admin_email=current_admin.email,
+            action="check_file_integrity",
+            details=f"Integrity check for {filename}: {integrity_result.status}",
+            ip_address=get_client_ip(request),
+            endpoint=f"/api/v1/admin/files/{file_id}/operation"
+        )
+        
+        return {"integrity_check": integrity_result.dict()}
+        
+    except Exception as e:
+        # Update file record with failed integrity check
+        db.files.update_one(
+            {"_id": file_id},
+            {
+                "$set": {
+                    "last_integrity_check": datetime.utcnow(),
+                    "integrity_status": "failed"
+                }
+            }
+        )
+        
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Integrity check failed: {str(e)}"
+        )
 
 async def force_file_backup(file_id: str, file_doc: dict, operation_data: FileOperationRequest, current_admin: AdminUserInDB, request: Request):
     """Force backup of file to Hetzner"""
@@ -2883,4 +3010,259 @@ async def bulk_hetzner_file_action(
         "message": f"{result.modified_count} files {action_msg} successfully",
         "files_processed": result.modified_count,
         "action": action_data.action
+    }
+
+@router.post("/files/{file_id}/archive")
+async def archive_file(
+    file_id: str,
+    archive_data: ArchiveFileRequest,
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Archive a file instead of deleting it permanently"""
+    
+    file_doc = db.files.find_one({"_id": file_id})
+    if not file_doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+    
+    if file_doc.get("archived"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File is already archived"
+        )
+    
+    # Store original location before archiving
+    original_location = file_doc.get("storage_location")
+    
+    # Update file to archived status
+    update_doc = {
+        "archived": True,
+        "archived_at": datetime.utcnow(),
+        "archived_by": current_admin.email,
+        "archive_reason": archive_data.reason,
+        "original_storage_location": original_location,
+        "storage_location": StorageLocation.ARCHIVED,
+        "status": UploadStatus.ARCHIVED,
+        "updated_at": datetime.utcnow()
+    }
+    
+    # Add to action history
+    action_history = ActionHistory(
+        action="archive",
+        performed_by=current_admin.email,
+        performed_at=datetime.utcnow(),
+        reason=archive_data.reason,
+        details=f"File archived from {original_location}",
+        ip_address=get_client_ip(request)
+    )
+    
+    db.files.update_one(
+        {"_id": file_id},
+        {
+            "$set": update_doc,
+            "$push": {"action_history": action_history.dict()}
+        }
+    )
+    
+    # Log admin activity
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action="archive_file",
+        details=f"Archived file: {file_doc.get('filename', 'Unknown')} (ID: {file_id}). Reason: {archive_data.reason or 'No reason provided'}",
+        ip_address=get_client_ip(request),
+        endpoint=f"/api/v1/admin/files/{file_id}/archive"
+    )
+    
+    return {"message": "File archived successfully", "archived_at": update_doc["archived_at"]}
+
+@router.post("/files/{file_id}/restore")
+async def restore_file(
+    file_id: str,
+    restore_data: RestoreFileRequest,
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Restore a file from archive"""
+    
+    file_doc = db.files.find_one({"_id": file_id})
+    if not file_doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+    
+    if not file_doc.get("archived"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File is not archived"
+        )
+    
+    # Restore to original location
+    original_location = file_doc.get("original_storage_location", StorageLocation.GDRIVE)
+    
+    # Update file to restore it
+    update_doc = {
+        "archived": False,
+        "archived_at": None,
+        "archived_by": None,
+        "archive_reason": None,
+        "original_storage_location": None,
+        "storage_location": original_location,
+        "status": UploadStatus.COMPLETED,
+        "updated_at": datetime.utcnow()
+    }
+    
+    # Add to action history
+    action_history = ActionHistory(
+        action="restore",
+        performed_by=current_admin.email,
+        performed_at=datetime.utcnow(),
+        reason=restore_data.reason,
+        details=f"File restored to {original_location}",
+        ip_address=get_client_ip(request)
+    )
+    
+    db.files.update_one(
+        {"_id": file_id},
+        {
+            "$set": update_doc,
+            "$push": {"action_history": action_history.dict()}
+        }
+    )
+    
+    # Log admin activity
+    await log_admin_activity(
+        admin_email=current_admin.email,
+        action="restore_file",
+        details=f"Restored file: {file_doc.get('filename', 'Unknown')} (ID: {file_id}). Reason: {restore_data.reason or 'No reason provided'}",
+        ip_address=get_client_ip(request),
+        endpoint=f"/api/v1/admin/files/{file_id}/restore"
+    )
+    
+    return {"message": "File restored successfully", "restored_to": original_location}
+
+@router.get("/files/archived")
+async def list_archived_files(
+    request: Request,
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    search: Optional[str] = Query(None),
+    file_type: Optional[str] = Query(None),
+    size_min: Optional[int] = Query(None),
+    size_max: Optional[int] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    owner_email: Optional[str] = Query(None),
+    sort_by: Optional[str] = Query("archived_at"),
+    sort_order: Optional[str] = Query("desc"),
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Get list of archived files"""
+    
+    # Build query for archived files
+    query = {"archived": True}
+    
+    # Add search filter
+    if search:
+        query["filename"] = {"$regex": search, "$options": "i"}
+    
+    # Add file type filter
+    if file_type:
+        query["file_type"] = file_type
+    
+    # Add size filters
+    if size_min is not None or size_max is not None:
+        size_query = {}
+        if size_min is not None:
+            size_query["$gte"] = size_min
+        if size_max is not None:
+            size_query["$lte"] = size_max
+        query["size_bytes"] = size_query
+    
+    # Add date filters
+    if date_from:
+        try:
+            from_date = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
+            query["archived_at"] = {"$gte": from_date}
+        except ValueError:
+            pass
+    
+    if date_to:
+        try:
+            to_date = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
+            if "archived_at" in query:
+                query["archived_at"]["$lte"] = to_date
+            else:
+                query["archived_at"] = {"$lte": to_date}
+        except ValueError:
+            pass
+    
+    # Add owner filter
+    if owner_email:
+        user = db.users.find_one({"email": owner_email})
+        if user:
+            query["owner_id"] = user["_id"]
+    
+    # Build sort
+    sort_field = sort_by if sort_by in ["archived_at", "filename", "size_bytes", "upload_date"] else "archived_at"
+    sort_direction = -1 if sort_order == "desc" else 1
+    
+    # Get total count
+    total = db.files.count_documents(query)
+    
+    # Get files with pagination
+    skip = (page - 1) * limit
+    files_cursor = db.files.find(query).sort(sort_field, sort_direction).skip(skip).limit(limit)
+    
+    files = []
+    for file_doc in files_cursor:
+        file_doc["_id"] = str(file_doc["_id"])
+        file_doc["size_formatted"] = format_file_size(file_doc.get("size_bytes", 0))
+        
+        # Enrich files with owner information
+        if file_doc.get("owner_id"):
+            owner = db.users.find_one({"_id": file_doc["owner_id"]}, {"email": 1, "_id": 0})
+            file_doc["owner_email"] = owner["email"] if owner else "Unknown"
+        else:
+            file_doc["owner_email"] = "Anonymous"
+        
+        files.append(file_doc)
+    
+    total_pages = (total + limit - 1) // limit
+    
+    return {
+        "files": files,
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "total_pages": total_pages
+    }
+
+@router.get("/files/{file_id}/action-history")
+async def get_file_action_history(
+    file_id: str,
+    request: Request,
+    current_admin: AdminUserInDB = Depends(get_current_admin)
+):
+    """Get action history for a specific file"""
+    
+    file_doc = db.files.find_one({"_id": file_id})
+    if not file_doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+    
+    action_history = file_doc.get("action_history", [])
+    
+    # Sort by performed_at descending (most recent first)
+    action_history.sort(key=lambda x: x.get("performed_at", ""), reverse=True)
+    
+    return {
+        "file_id": file_id,
+        "filename": file_doc.get("filename"),
+        "action_history": action_history
     }
