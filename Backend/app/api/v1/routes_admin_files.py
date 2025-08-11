@@ -3356,12 +3356,33 @@ async def list_drive_archived_files(
         
         files.append(file_doc)
     
+    # Get drive-specific statistics for archived files
+    drive_stats = {
+        "total_files": db.files.count_documents({"archived": True, "storage_location": StorageLocation.GDRIVE}),
+        "total_storage": 0,
+        "total_storage_formatted": "0 B",
+        "transferring_to_hetzner": 0,
+        "backed_up_to_hetzner": 0,
+        "failed_backups": 0
+    }
+    
+    # Calculate total storage for archived files
+    storage_pipeline = [
+        {"$match": {"archived": True, "storage_location": StorageLocation.GDRIVE}},
+        {"$group": {"_id": None, "total_size": {"$sum": "$size_bytes"}}}
+    ]
+    storage_result = list(db.files.aggregate(storage_pipeline))
+    if storage_result:
+        drive_stats["total_storage"] = storage_result[0]["total_size"]
+        drive_stats["total_storage_formatted"] = format_file_size(storage_result[0]["total_size"])
+    
     return {
         "files": files,
         "total": total_files,
         "page": page,
         "limit": limit,
-        "total_pages": total_pages
+        "total_pages": total_pages,
+        "drive_stats": drive_stats
     }
 
 @router.get("/hetzner/files/archived")
@@ -3468,12 +3489,32 @@ async def list_hetzner_archived_files(
         
         files.append(file_doc)
     
+    # Get hetzner-specific statistics for archived files
+    hetzner_stats = {
+        "total_files": db.files.count_documents({"archived": True, "backup_status": BackupStatus.COMPLETED, "backup_location": StorageLocation.HETZNER}),
+        "total_storage": 0,
+        "total_storage_formatted": "0 B",
+        "recent_backups": 0,
+        "failed_backups": 0
+    }
+    
+    # Calculate total storage for archived files
+    storage_pipeline = [
+        {"$match": {"archived": True, "backup_status": BackupStatus.COMPLETED, "backup_location": StorageLocation.HETZNER}},
+        {"$group": {"_id": None, "total_size": {"$sum": "$size_bytes"}}}
+    ]
+    storage_result = list(db.files.aggregate(storage_pipeline))
+    if storage_result:
+        hetzner_stats["total_storage"] = storage_result[0]["total_size"]
+        hetzner_stats["total_storage_formatted"] = format_file_size(storage_result[0]["total_size"])
+    
     return {
         "files": files,
         "total": total_files,
         "page": page,
         "limit": limit,
-        "total_pages": total_pages
+        "total_pages": total_pages,
+        "hetzner_stats": hetzner_stats
     }
 
 @router.get("/files/{file_id}/action-history")

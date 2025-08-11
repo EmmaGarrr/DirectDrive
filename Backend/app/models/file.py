@@ -49,6 +49,7 @@ class FileMetadataCreate(FileMetadataBase):
     status: UploadStatus = UploadStatus.PENDING
     gdrive_id: Optional[str] = None
     gdrive_account_id: Optional[str] = None
+    gdrive_file_path: Optional[str] = None  # NEW: Google Drive file path
     
     # --- NEW: Fields for backup storage ---
     backup_status: BackupStatus = BackupStatus.NONE
@@ -76,6 +77,17 @@ class FileMetadataCreate(FileMetadataBase):
     last_integrity_check: Optional[datetime.datetime] = None
     integrity_status: Optional[str] = None  # 'verified', 'corrupted', 'unknown'
     
+    # --- NEW: Error tracking fields ---
+    upload_error: Optional[str] = None
+    upload_error_details: Optional[str] = None
+    backup_error: Optional[str] = None
+    backup_error_details: Optional[str] = None
+    
+    # --- NEW: Deletion tracking fields ---
+    deleted_at: Optional[datetime.datetime] = None
+    deleted_by: Optional[str] = None
+    deletion_reason: Optional[str] = None
+    
     owner_id: Optional[str] = None
     batch_id: Optional[str] = None
 
@@ -88,6 +100,7 @@ class FileMetadataInDB(FileMetadataBase):
     status: UploadStatus
     gdrive_id: Optional[str] = None
     gdrive_account_id: Optional[str] = None
+    gdrive_file_path: Optional[str] = None  # NEW: Google Drive file path
 
     # --- NEW: Fields for backup storage ---
     backup_status: BackupStatus
@@ -114,6 +127,17 @@ class FileMetadataInDB(FileMetadataBase):
     integrity_checksum: Optional[str] = None
     last_integrity_check: Optional[datetime.datetime] = None
     integrity_status: Optional[str] = None
+
+    # --- NEW: Error tracking fields ---
+    upload_error: Optional[str] = None
+    upload_error_details: Optional[str] = None
+    backup_error: Optional[str] = None
+    backup_error_details: Optional[str] = None
+    
+    # --- NEW: Deletion tracking fields ---
+    deleted_at: Optional[datetime.datetime] = None
+    deleted_by: Optional[str] = None
+    deletion_reason: Optional[str] = None
 
     owner_id: Optional[str] = None
     batch_id: Optional[str] = None
